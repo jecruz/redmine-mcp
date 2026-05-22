@@ -332,5 +332,43 @@ def create_document(
     return _create_document_in_browser(project_identifier, title, description, category_id)
 
 
+@mcp.tool()
+def create_project(
+    name: str,
+    identifier: str,
+    description: str = "",
+    parent_id: int | None = None,
+    inherit_members: bool = True,
+) -> dict[str, Any]:
+    """Create a Redmine project.
+
+    Args:
+        name: Display name for the project
+        identifier: URL-safe slug (alphanumeric + hyphens, max 100 chars)
+        description: Project description
+        parent_id: Optional parent project ID for nesting
+        inherit_members: Inherit parent members if parent_id is set
+    """
+    project: dict[str, Any] = {
+        "name": name,
+        "identifier": identifier,
+        "description": description,
+        "inherit_members": inherit_members,
+    }
+    if parent_id is not None:
+        project["parent_id"] = parent_id
+
+    data = _request("POST", "/projects.json", json={"project": project})
+    p = data.get("project", {})
+    return {
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "identifier": p.get("identifier"),
+        "description": p.get("description"),
+        "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
+        "created_on": p.get("created_on"),
+    }
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
