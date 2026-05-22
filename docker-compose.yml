@@ -1,0 +1,21 @@
+services:
+  redmine-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-tools/redmine-mcp:local
+    container_name: redmine-mcp
+    restart: unless-stopped
+    env_file:
+      - ./redmine-mcp.env
+    networks:
+      - memory
+      - redmine-mcp
+
+networks:
+  memory:
+    external: true
+    name: memory_default
+  redmine-mcp:
+    external: true
+    name: redmine-mcp_default
