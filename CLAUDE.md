@@ -32,6 +32,7 @@ Environment file at `/Users/jeffreycruz/Development/agent-zero-data/redmine-mcp.
 - `update_issue_status` — Update issue status and optionally add a note
 - `add_issue_note` — Append a journal note to an issue
 - `create_document` — Create a project document through the Redmine HTML form (not available via JSON REST API — uses web session auth with REDMINE_WEB_USERNAME/REDMINE_WEB_PASSWORD or REDMINE_WEB_SESSION_COOKIE)
+- `create_project` — Create a new Redmine project via the REST API (name, identifier, description, optional parent_id)
 
 ## Networks
 

@@ -310,7 +310,11 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "title": {"type": "string"},
                      "description": {"type": "string"}, "category_id": {"type": "number"}}}},
-            ]}
+                {"name": "create_project", "description": "Create a new Redmine project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "name": {"type": "string"}, "identifier": {"type": "string"},
+                     "description": {"type": "string"}, "parent_id": {"type": "number"},
+                     "inherit_members": {"type": "boolean"}}}}]
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -346,6 +350,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_document(
                     args.get("project_id"), args.get("title"), args.get("description", ""),
                     args.get("category_id"), api_key)
+            elif name == "create_project":
+                return self._create_project(
+                    args.get("name"), args.get("identifier"), args.get("description", ""),
+                    args.get("parent_id"), args.get("inherit_members", True), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -407,6 +415,26 @@ class MCPHandler(BaseHTTPRequestHandler):
     def _create_document(self, project_id, title, description, category_id, api_key):
         project_identifier = _resolve_project_identifier(project_id, api_key)
         return _create_document_web(project_identifier, title, description, category_id)
+
+    def _create_project(self, name, identifier, description, parent_id, inherit_members, api_key):
+        project = {
+            "name": name,
+            "identifier": identifier,
+            "description": description,
+            "inherit_members": inherit_members,
+        }
+        if parent_id is not None:
+            project["parent_id"] = parent_id
+        data = _rm_request("POST", "/projects.json", api_key, json={"project": project})
+        p = data.get("project", {})
+        return {
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "identifier": p.get("identifier"),
+            "description": p.get("description"),
+            "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
+            "created_on": p.get("created_on"),
+        }
 
     def log_message(self, f, *args):
         pass
