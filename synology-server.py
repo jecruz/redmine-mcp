@@ -421,10 +421,10 @@ class MCPHandler(BaseHTTPRequestHandler):
             "name": name,
             "identifier": identifier,
             "description": description,
-            "inherit_members": inherit_members,
         }
         if parent_id is not None:
             project["parent_id"] = parent_id
+            project["inherit_members"] = True
         data = _rm_request("POST", "/projects.json", api_key, json={"project": project})
         p = data.get("project", {})
         return {

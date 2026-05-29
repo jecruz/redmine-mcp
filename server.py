@@ -16,6 +16,7 @@ MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
 MCP_PATH = os.getenv("MCP_PATH", "/sse")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "sse")
 
 
 if not REDMINE_URL:
@@ -353,10 +354,10 @@ def create_project(
         "name": name,
         "identifier": identifier,
         "description": description,
-        "inherit_members": inherit_members,
     }
     if parent_id is not None:
         project["parent_id"] = parent_id
+        project["inherit_members"] = True
 
     data = _request("POST", "/projects.json", json={"project": project})
     p = data.get("project", {})
@@ -371,4 +372,4 @@ def create_project(
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport=MCP_TRANSPORT)
