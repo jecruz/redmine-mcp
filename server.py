@@ -17,6 +17,8 @@ MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
 MCP_PATH = os.getenv("MCP_PATH", "/sse")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "sse")
+AGENT_TASK_TRACKER_ID = 3
+IDEA_TRACKER_ID = 6
 
 
 if not REDMINE_URL:
@@ -179,9 +181,13 @@ def _create_document_in_browser(
 def _clean_issue(issue: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": issue.get("id"),
+        "project_id": issue.get("project", {}).get("id"),
         "project": issue.get("project", {}).get("name"),
+        "tracker_id": issue.get("tracker", {}).get("id"),
         "tracker": issue.get("tracker", {}).get("name"),
+        "status_id": issue.get("status", {}).get("id"),
         "status": issue.get("status", {}).get("name"),
+        "priority_id": issue.get("priority", {}).get("id"),
         "priority": issue.get("priority", {}).get("name"),
         "author": issue.get("author", {}).get("name"),
         "assigned_to": issue.get("assigned_to", {}).get("name"),
@@ -193,6 +199,22 @@ def _clean_issue(issue: dict[str, Any]) -> dict[str, Any]:
         "created_on": issue.get("created_on"),
         "updated_on": issue.get("updated_on"),
     }
+
+
+def _validate_agent_tracker(tracker_id: int, *, allow_idea_tracker: bool) -> None:
+    if tracker_id == IDEA_TRACKER_ID and not allow_idea_tracker:
+        raise ValueError("Idea tracker is reserved for explicit user idea capture; agents must use tracker_id 3")
+
+
+def _assert_tracker_honored(issue: dict[str, Any], requested_tracker_id: int) -> None:
+    actual_tracker_id = issue.get("tracker", {}).get("id")
+    if actual_tracker_id is None or actual_tracker_id == requested_tracker_id:
+        return
+    issue_id = issue.get("id", "unknown")
+    raise RuntimeError(
+        f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {requested_tracker_id}, "
+        f"Redmine returned tracker_id {actual_tracker_id}"
+    )
 
 
 @mcp.tool()
@@ -233,6 +255,7 @@ def list_issues(
     assigned_to_id: str | int | None = None,
     status_id: str | int | None = None,
     tracker_id: int | None = None,
+    subject_contains: str | None = None,
     limit: int = 25,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -249,6 +272,8 @@ def list_issues(
         params["status_id"] = status_id
     if tracker_id is not None:
         params["tracker_id"] = tracker_id
+    if subject_contains:
+        params["subject"] = f"~{subject_contains}"
 
     data = _request("GET", "/issues.json", params=params)
     issues = data.get("issues", [])
@@ -287,8 +312,10 @@ def create_issue(
     assigned_to_id: int | None = None,
     priority_id: int = 2,
     status_id: int = 1,
+    allow_idea_tracker: bool = False,
 ) -> dict[str, Any]:
     """Create a Redmine issue."""
+    _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
     issue: dict[str, Any] = {
         "project_id": project_id,
         "subject": subject,
@@ -301,7 +328,9 @@ def create_issue(
         issue["assigned_to_id"] = assigned_to_id
 
     data = _request("POST", "/issues.json", json={"issue": issue})
-    return _clean_issue(data.get("issue", {}))
+    created_issue = data.get("issue", {})
+    _assert_tracker_honored(created_issue, tracker_id)
+    return _clean_issue(created_issue)
 
 
 @mcp.tool()
@@ -312,6 +341,45 @@ def update_issue_status(issue_id: int, status_id: int, note: str = "") -> dict[s
         issue["notes"] = note
     _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
     return get_issue(issue_id, include="journals")
+
+
+@mcp.tool()
+def move_issue(issue_id: int, project_id: int, note: str = "") -> dict[str, Any]:
+    """Move an issue to another Redmine project and optionally add a note."""
+    _request("GET", f"/projects/{project_id}.json")
+    issue: dict[str, Any] = {"project_id": project_id}
+    if note:
+        issue["notes"] = note
+    _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
+    updated = get_issue(issue_id, include="journals")
+    if updated.get("project_id") not in (None, project_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, "
+            f"Redmine returned project_id {updated.get('project_id')}"
+        )
+    return updated
+
+
+@mcp.tool()
+def update_issue_tracker(
+    issue_id: int,
+    tracker_id: int = AGENT_TASK_TRACKER_ID,
+    note: str = "",
+    allow_idea_tracker: bool = False,
+) -> dict[str, Any]:
+    """Change an issue tracker and optionally add a note."""
+    _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
+    issue: dict[str, Any] = {"tracker_id": tracker_id}
+    if note:
+        issue["notes"] = note
+    _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
+    updated = get_issue(issue_id, include="journals")
+    if updated.get("tracker_id") not in (None, tracker_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
+            f"Redmine returned tracker_id {updated.get('tracker_id')}"
+        )
+    return updated
 
 
 @mcp.tool()

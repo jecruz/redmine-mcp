@@ -10,6 +10,8 @@ REDMINE_URL = os.getenv("REDMINE_URL", "http://10.0.0.23:8085").rstrip("/")
 DEFAULT_REDMINE_API_KEY = os.getenv("REDMINE_API_KEY", "")
 PORT = int(os.getenv("PORT", "8095"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+AGENT_TASK_TRACKER_ID = 3
+IDEA_TRACKER_ID = 6
 
 REDMINE_WEB_USERNAME = os.getenv("REDMINE_WEB_USERNAME", "")
 REDMINE_WEB_PASSWORD = os.getenv("REDMINE_WEB_PASSWORD", "")
@@ -65,9 +67,13 @@ def _rm_request(method, path, api_key, **kwargs):
 def _clean_issue(issue):
     return {
         "id": issue.get("id"),
+        "project_id": (issue.get("project") or {}).get("id"),
         "project": (issue.get("project") or {}).get("name"),
+        "tracker_id": (issue.get("tracker") or {}).get("id"),
         "tracker": (issue.get("tracker") or {}).get("name"),
+        "status_id": (issue.get("status") or {}).get("id"),
         "status": (issue.get("status") or {}).get("name"),
+        "priority_id": (issue.get("priority") or {}).get("id"),
         "priority": (issue.get("priority") or {}).get("name"),
         "author": (issue.get("author") or {}).get("name"),
         "assigned_to": (issue.get("assigned_to") or {}).get("name"),
@@ -79,6 +85,20 @@ def _clean_issue(issue):
         "created_on": issue.get("created_on"),
         "updated_on": issue.get("updated_on"),
     }
+
+def _validate_agent_tracker(tracker_id, allow_idea_tracker=False):
+    if int(tracker_id) == IDEA_TRACKER_ID and not allow_idea_tracker:
+        raise ValueError("Idea tracker is reserved for explicit user idea capture; agents must use tracker_id 3")
+
+def _assert_tracker_honored(issue, requested_tracker_id):
+    actual_tracker_id = (issue.get("tracker") or {}).get("id")
+    if actual_tracker_id is None or int(actual_tracker_id) == int(requested_tracker_id):
+        return
+    issue_id = issue.get("id", "unknown")
+    raise RuntimeError(
+        f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {requested_tracker_id}, "
+        f"Redmine returned tracker_id {actual_tracker_id}"
+    )
 
 # ── Document creation helpers (HTML form, not JSON API) ──
 
@@ -298,11 +318,19 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "project_id": {"type": "number"}, "subject": {"type": "string"},
                      "description": {"type": "string"}, "tracker_id": {"type": "number"},
                      "assigned_to_id": {"type": "number"}, "priority_id": {"type": "number"},
-                     "status_id": {"type": "number"}}}},
+                     "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"}}}},
                 {"name": "update_issue_status", "description": "Update a Redmine issue status and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "status_id": {"type": "number"},
                      "note": {"type": "string"}}}},
+                {"name": "move_issue", "description": "Move a Redmine issue to another visible project and optionally add a note",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"}, "project_id": {"type": "number"},
+                     "note": {"type": "string"}}}},
+                {"name": "update_issue_tracker", "description": "Update a Redmine issue tracker and optionally add a note",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"}, "tracker_id": {"type": "number"},
+                     "note": {"type": "string"}, "allow_idea_tracker": {"type": "boolean"}}}},
                 {"name": "add_issue_note", "description": "Append a journal note to a Redmine issue",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "note": {"type": "string"}}}},
@@ -314,7 +342,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
                      "description": {"type": "string"}, "parent_id": {"type": "number"},
-                     "inherit_members": {"type": "boolean"}}}}]
+                     "inherit_members": {"type": "boolean"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -341,9 +369,16 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_issue(
                     args.get("project_id"), args.get("subject"), args.get("description", ""),
                     args.get("tracker_id", 3), args.get("assigned_to_id"),
-                    args.get("priority_id", 2), args.get("status_id", 1), api_key)
+                    args.get("priority_id", 2), args.get("status_id", 1),
+                    args.get("allow_idea_tracker", False), api_key)
             elif name == "update_issue_status":
                 return self._update_issue_status(args.get("issue_id"), args.get("status_id"), args.get("note", ""), api_key)
+            elif name == "move_issue":
+                return self._move_issue(args.get("issue_id"), args.get("project_id"), args.get("note", ""), api_key)
+            elif name == "update_issue_tracker":
+                return self._update_issue_tracker(
+                    args.get("issue_id"), args.get("tracker_id", AGENT_TASK_TRACKER_ID),
+                    args.get("note", ""), args.get("allow_idea_tracker", False), api_key)
             elif name == "add_issue_note":
                 return self._add_issue_note(args.get("issue_id"), args.get("note"), api_key)
             elif name == "create_document":
@@ -394,19 +429,48 @@ class MCPHandler(BaseHTTPRequestHandler):
         result["attachments"] = issue.get("attachments", [])
         return result
 
-    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, api_key):
+    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, api_key):
+        _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"project_id": project_id, "subject": subject, "description": description,
                  "tracker_id": tracker_id, "priority_id": priority_id, "status_id": status_id}
         if assigned_to_id is not None:
             issue["assigned_to_id"] = assigned_to_id
         data = _rm_request("POST", "/issues.json", api_key, json={"issue": issue})
-        return _clean_issue(data.get("issue", {}))
+        created_issue = data.get("issue", {})
+        _assert_tracker_honored(created_issue, tracker_id)
+        return _clean_issue(created_issue)
 
     def _update_issue_status(self, issue_id, status_id, note, api_key):
         issue = {"status_id": status_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
         return self._get_issue(issue_id, "journals", api_key)
+
+    def _move_issue(self, issue_id, project_id, note, api_key):
+        _rm_request("GET", f"/projects/{project_id}.json", api_key)
+        issue = {"project_id": project_id}
+        if note: issue["notes"] = note
+        _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+        updated = self._get_issue(issue_id, "journals", api_key)
+        if updated.get("project_id") not in (None, project_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, "
+                f"Redmine returned project_id {updated.get('project_id')}"
+            )
+        return updated
+
+    def _update_issue_tracker(self, issue_id, tracker_id, note, allow_idea_tracker, api_key):
+        _validate_agent_tracker(tracker_id, allow_idea_tracker)
+        issue = {"tracker_id": tracker_id}
+        if note: issue["notes"] = note
+        _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+        updated = self._get_issue(issue_id, "journals", api_key)
+        if updated.get("tracker_id") not in (None, tracker_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
+                f"Redmine returned tracker_id {updated.get('tracker_id')}"
+            )
+        return updated
 
     def _add_issue_note(self, issue_id, note, api_key):
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": {"notes": note}})
