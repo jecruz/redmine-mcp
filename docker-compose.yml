@@ -4,10 +4,18 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ai-tools/redmine-mcp:local
-    container_name: redmine-mcp
+    container_name: ${CONTAINER_NAME:-redmine-mcp}
     restart: unless-stopped
-    env_file:
-      - ./redmine-mcp.env
+    environment:
+      REDMINE_URL: ${REDMINE_URL:?REDMINE_URL is required}
+      REDMINE_API_KEY: ${REDMINE_API_KEY:?REDMINE_API_KEY is required}
+      REDMINE_WEB_USERNAME: ${REDMINE_WEB_USERNAME:-}
+      REDMINE_WEB_PASSWORD: ${REDMINE_WEB_PASSWORD:-}
+      REDMINE_WEB_SESSION_COOKIE: ${REDMINE_WEB_SESSION_COOKIE:-}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: ${MCP_PORT:-8080}
+      MCP_PATH: ${MCP_PATH:-/sse}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
     networks:
       - memory
       - redmine-mcp

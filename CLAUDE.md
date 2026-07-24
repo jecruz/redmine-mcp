@@ -6,14 +6,16 @@ Agnostic MCP server providing a Model Context Protocol interface to Redmine's RE
 
 ```bash
 cd /Users/jeffreycruz/Development/AI_TOOLS/redmine-mcp
-docker --context orbstack compose up -d
+python3 scripts/redmine_mcp_up.py --instance forge
 ```
 
 ## Configuration
 
-Environment file at `/Users/jeffreycruz/Development/agent-zero-data/redmine-mcp.env`:
+Instance env files live under `/Users/jeffreycruz/Development/agent-zero-data/<instance>/redmine-mcp.env`:
 - `REDMINE_URL` — Redmine instance URL (e.g. http://10.0.0.23:8085)
-- `REDMINE_API_KEY` — Redmine API key
+- `REDMINE_API_KEY_REF` — Keyring reference for the Redmine API key
+- `REDMINE_AGENT_ID` — Owning CAISS agent id used to resolve the ref
+- `CAISS_KEYRING_CLI` — Host-side keyring CLI used to resolve the ref
 - `REDMINE_WEB_USERNAME` — Optional Redmine web login for document creation
 - `REDMINE_WEB_PASSWORD` — Optional Redmine web password for document creation
 - `REDMINE_WEB_SESSION_COOKIE` — Optional semicolon-delimited cookie string for document creation
@@ -37,6 +39,12 @@ Environment file at `/Users/jeffreycruz/Development/agent-zero-data/redmine-mcp.
 ## Networks
 
 Connects to `memory_default` and `redmine-mcp_default` for container-to-container communication.
+
+## Launch Flow
+
+Use `scripts/redmine_mcp_up.py` so the host resolves `REDMINE_API_KEY_REF`
+through CAISS Keyring at launch time. The resolved secret is injected only for
+the running container and is not stored back into the env file.
 
 ## Document Creation
 

@@ -4,15 +4,16 @@ Verifies that:
 - Top-level projects (no parent_id) do NOT include inherit_members
 - Subprojects (with parent_id) include inherit_members: True
 """
-import os
 import re
+from pathlib import Path
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_server_py_code_has_conditional_inherit():
     """Verify server.py: inherit_members = True only set inside 'if parent_id is not None' block."""
-    path = "/Users/jeffreycruz/Development/AI_TOOLS/redmine-mcp"
-    with open(os.path.join(path, "server.py")) as f:
+    with open(REPO_ROOT / "server.py") as f:
         content = f.read()
 
     func_match = re.search(
@@ -50,8 +51,7 @@ def test_server_py_code_has_conditional_inherit():
 
 def test_synology_py_code_has_conditional_inherit():
     """Verify synology-server.py: inherit_members = True only set inside 'if parent_id is not None' block."""
-    path = "/Users/jeffreycruz/Development/AI_TOOLS/redmine-mcp"
-    with open(os.path.join(path, "synology-server.py")) as f:
+    with open(REPO_ROOT / "synology-server.py") as f:
         content = f.read()
 
     func_match = re.search(
@@ -86,11 +86,8 @@ def test_synology_py_code_has_conditional_inherit():
 
 def test_both_files_have_create_project():
     """Both server.py and synology-server.py must have create_project functionality."""
-    path = "/Users/jeffreycruz/Development/AI_TOOLS/redmine-mcp"
-    with open(os.path.join(path, "server.py")) as f:
-        assert "def create_project" in f.read()
-    with open(os.path.join(path, "synology-server.py")) as f:
-        assert "def _create_project" in f.read()
+    assert "def create_project" in (REPO_ROOT / "server.py").read_text()
+    assert "def _create_project" in (REPO_ROOT / "synology-server.py").read_text()
 
 
 if __name__ == "__main__":
