@@ -318,7 +318,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "project_id": {"type": "number"}, "subject": {"type": "string"},
                      "description": {"type": "string"}, "tracker_id": {"type": "number"},
                      "assigned_to_id": {"type": "number"}, "priority_id": {"type": "number"},
-                     "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"}}}},
+                     "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"},
+                     "category_id": {"type": "number"}, "due_date": {"type": "string"},
+                     "start_date": {"type": "string"}, "estimated_hours": {"type": "number"}}}},
                 {"name": "update_issue_status", "description": "Update a Redmine issue status and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "status_id": {"type": "number"},
@@ -370,7 +372,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("project_id"), args.get("subject"), args.get("description", ""),
                     args.get("tracker_id", 3), args.get("assigned_to_id"),
                     args.get("priority_id", 2), args.get("status_id", 1),
-                    args.get("allow_idea_tracker", False), api_key)
+                    args.get("allow_idea_tracker", False),
+                    args.get("category_id"), args.get("due_date"),
+                    args.get("start_date"), args.get("estimated_hours"),
+                    api_key)
             elif name == "update_issue_status":
                 return self._update_issue_status(args.get("issue_id"), args.get("status_id"), args.get("note", ""), api_key)
             elif name == "move_issue":
@@ -429,12 +434,20 @@ class MCPHandler(BaseHTTPRequestHandler):
         result["attachments"] = issue.get("attachments", [])
         return result
 
-    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, api_key):
+    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, category_id, due_date, start_date, estimated_hours, api_key):
         _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"project_id": project_id, "subject": subject, "description": description,
                  "tracker_id": tracker_id, "priority_id": priority_id, "status_id": status_id}
         if assigned_to_id is not None:
             issue["assigned_to_id"] = assigned_to_id
+        if category_id is not None:
+            issue["category_id"] = category_id
+        if due_date is not None:
+            issue["due_date"] = due_date
+        if start_date is not None:
+            issue["start_date"] = start_date
+        if estimated_hours is not None:
+            issue["estimated_hours"] = estimated_hours
         data = _rm_request("POST", "/issues.json", api_key, json={"issue": issue})
         created_issue = data.get("issue", {})
         _assert_tracker_honored(created_issue, tracker_id)
