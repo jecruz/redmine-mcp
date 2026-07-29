@@ -351,6 +351,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                 {"name": "add_issue_note", "description": "Append a journal note to a Redmine issue",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "note": {"type": "string"}}}},
+                {"name": "list_issue_categories", "description": "List the issue categories defined on a Redmine project (returns id, name, project_id, and assigned_to_id when set)",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}},
+                     "required": ["project_id"]}},
                 {"name": "create_document", "description": "Create a Redmine project document through the HTML form (requires web session auth — REDMINE_WEB_USERNAME/REDMINE_WEB_PASSWORD or REDMINE_WEB_SESSION_COOKIE env vars)",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "title": {"type": "string"},
@@ -415,6 +419,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("note", ""), args.get("allow_idea_tracker", False), api_key)
             elif name == "add_issue_note":
                 return self._add_issue_note(args.get("issue_id"), args.get("note"), api_key)
+            elif name == "list_issue_categories":
+                return self._list_issue_categories(args.get("project_id"), api_key)
             elif name == "create_document":
                 return self._create_document(
                     args.get("project_id"), args.get("title"), args.get("description", ""),
@@ -521,6 +527,19 @@ class MCPHandler(BaseHTTPRequestHandler):
     def _add_issue_note(self, issue_id, note, api_key):
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": {"notes": note}})
         return self._get_issue(issue_id, "journals", api_key)
+
+    def _list_issue_categories(self, project_id, api_key):
+        data = _rm_request("GET", f"/projects/{project_id}.json?include=issue_categories", api_key)
+        categories = (data.get("project") or {}).get("issue_categories", [])
+        return [
+            {
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "project_id": (c.get("project") or {}).get("id"),
+                "assigned_to_id": (c.get("assigned_to") or {}).get("id"),
+            }
+            for c in categories
+        ]
 
     def _create_document(self, project_id, title, description, category_id, api_key):
         project_identifier = _resolve_project_identifier(project_id, api_key)
