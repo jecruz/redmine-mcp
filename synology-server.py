@@ -64,6 +64,23 @@ def _rm_request(method, path, api_key, **kwargs):
         raise
     return r.json() if r.content else {}
 
+
+def _rm_wiki_request(method, path, api_key, **kwargs):
+    """Like _rm_request but surfaces HTTP 409 for version-conflict detection."""
+    url = f"{REDMINE_URL}{path}"
+    r = requests.request(method, url, headers=_rm_headers(api_key), timeout=REQUEST_TIMEOUT, **kwargs)
+    if r.status_code == 409:
+        raise RuntimeError(
+            "Wiki page version conflict: the page has been modified since you last read it. "
+            "Re-read the page and retry with the current version."
+        )
+    try:
+        r.raise_for_status()
+    except Exception:
+        log(f"Redmine error: {r.status_code} {r.text[:300]}")
+        raise
+    return r.json() if r.content else {}
+
 def _clean_issue(issue):
     return {
         "id": issue.get("id"),
@@ -342,7 +359,24 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
                      "description": {"type": "string"}, "parent_id": {"type": "number"},
-                     "inherit_members": {"type": "boolean"}}}}]}
+                     "inherit_members": {"type": "boolean"}}}},
+                {"name": "list_wiki_pages", "description": "List all wiki pages in a Redmine project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}}}},
+                {"name": "get_wiki_page", "description": "Get a Redmine wiki page by title",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "version": {"type": "number"}}}},
+                {"name": "create_wiki_page", "description": "Create a new wiki page in a Redmine project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "text": {"type": "string"}, "parent_title": {"type": "string"},
+                     "comments": {"type": "string"}}}},
+                {"name": "update_wiki_page", "description": "Update an existing wiki page with optimistic concurrency control",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "text": {"type": "string"}, "version": {"type": "number"},
+                     "comments": {"type": "string"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -389,6 +423,18 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
                     args.get("parent_id"), args.get("inherit_members", True), api_key)
+            elif name == "list_wiki_pages":
+                return self._list_wiki_pages(args.get("project_id"), api_key)
+            elif name == "get_wiki_page":
+                return self._get_wiki_page(args.get("project_id"), args.get("title"), args.get("version"), api_key)
+            elif name == "create_wiki_page":
+                return self._create_wiki_page(
+                    args.get("project_id"), args.get("title"), args.get("text"),
+                    args.get("parent_title"), args.get("comments", ""), api_key)
+            elif name == "update_wiki_page":
+                return self._update_wiki_page(
+                    args.get("project_id"), args.get("title"), args.get("text"),
+                    args.get("version"), args.get("comments", ""), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -499,6 +545,38 @@ class MCPHandler(BaseHTTPRequestHandler):
             "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
             "created_on": p.get("created_on"),
         }
+
+    def _list_wiki_pages(self, project_id, api_key):
+        data = _rm_request("GET", f"/projects/{project_id}/wiki/index.json", api_key)
+        return data.get("wiki_pages", [])
+
+    def _get_wiki_page(self, project_id, title, version, api_key):
+        path = f"/projects/{project_id}/wiki/{title}.json"
+        params = {}
+        if version is not None:
+            params["version"] = version
+        data = _rm_request("GET", path, api_key, params=params)
+        return data.get("wiki_page", {})
+
+    def _create_wiki_page(self, project_id, title, text, parent_title, comments, api_key):
+        wiki_page = {"text": text, "comments": comments}
+        if parent_title is not None:
+            wiki_page["parent_title"] = parent_title
+        data = _rm_wiki_request(
+            "PUT", f"/projects/{project_id}/wiki/{title}.json",
+            api_key, json={"wiki_page": wiki_page},
+        )
+        return data.get("wiki_page", {})
+
+    def _update_wiki_page(self, project_id, title, text, version, comments, api_key):
+        wiki_page = {"text": text, "comments": comments}
+        if version is not None:
+            wiki_page["version"] = version
+        data = _rm_wiki_request(
+            "PUT", f"/projects/{project_id}/wiki/{title}.json",
+            api_key, json={"wiki_page": wiki_page},
+        )
+        return data.get("wiki_page", {})
 
     def log_message(self, f, *args):
         pass

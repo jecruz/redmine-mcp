@@ -61,6 +61,27 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
     return response.json()
 
 
+def _wiki_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    """Like _request but surfaces HTTP 409 for version-conflict detection."""
+    url = f"{REDMINE_URL}{path}"
+    response = requests.request(
+        method,
+        url,
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+        **kwargs,
+    )
+    if response.status_code == 409:
+        raise RuntimeError(
+            "Wiki page version conflict: the page has been modified since you last read it. "
+            "Re-read the page and retry with the current version."
+        )
+    response.raise_for_status()
+    if not response.content:
+        return {}
+    return response.json()
+
+
 def _extract_authenticity_token(html: str) -> str:
     match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html)
     if not match:
@@ -437,6 +458,102 @@ def create_project(
         "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
         "created_on": p.get("created_on"),
     }
+
+
+@mcp.tool()
+def list_wiki_pages(project_id: int) -> list[dict[str, Any]]:
+    """List all wiki pages in a Redmine project."""
+    data = _request("GET", f"/projects/{project_id}/wiki/index.json")
+    return data.get("wiki_pages", [])
+
+
+@mcp.tool()
+def get_wiki_page(
+    project_id: int,
+    title: str,
+    version: int | None = None,
+) -> dict[str, Any]:
+    """Get a Redmine wiki page by title, optionally at a specific version.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title (e.g. "Home", "ADRs")
+        version: Optional version number to retrieve a specific revision
+    """
+    path = f"/projects/{project_id}/wiki/{title}.json"
+    params: dict[str, Any] = {}
+    if version is not None:
+        params["version"] = version
+    data = _request("GET", path, params=params)
+    return data.get("wiki_page", {})
+
+
+@mcp.tool()
+def create_wiki_page(
+    project_id: int,
+    title: str,
+    text: str,
+    parent_title: str | None = None,
+    comments: str = "",
+) -> dict[str, Any]:
+    """Create a new wiki page in a Redmine project.
+
+    Redmine uses PUT for wiki page creation. If a page with the same title
+    already exists, this will update it rather than create a new one — use
+    the returned version number to distinguish.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title
+        text: Wiki page content (textile or markdown depending on project)
+        parent_title: Optional parent wiki page title for hierarchy
+        comments: Optional change comment
+    """
+    wiki_page: dict[str, Any] = {
+        "text": text,
+        "comments": comments,
+    }
+    if parent_title is not None:
+        wiki_page["parent_title"] = parent_title
+    data = _wiki_request(
+        "PUT",
+        f"/projects/{project_id}/wiki/{title}.json",
+        json={"wiki_page": wiki_page},
+    )
+    return data.get("wiki_page", {})
+
+
+@mcp.tool()
+def update_wiki_page(
+    project_id: int,
+    title: str,
+    text: str,
+    version: int | None = None,
+    comments: str = "",
+) -> dict[str, Any]:
+    """Update an existing wiki page with optimistic concurrency control.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title
+        text: New wiki page content
+        version: Current version number for optimistic concurrency.
+                 If provided and it doesn't match the server's current version,
+                 a 409 error is raised.
+        comments: Optional change comment
+    """
+    wiki_page: dict[str, Any] = {
+        "text": text,
+        "comments": comments,
+    }
+    if version is not None:
+        wiki_page["version"] = version
+    data = _wiki_request(
+        "PUT",
+        f"/projects/{project_id}/wiki/{title}.json",
+        json={"wiki_page": wiki_page},
+    )
+    return data.get("wiki_page", {})
 
 
 if __name__ == "__main__":
