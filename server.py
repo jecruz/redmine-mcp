@@ -1,6 +1,8 @@
 import os
 import re
+import mimetypes
 from html import unescape
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -59,6 +61,45 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
     if not response.content:
         return {}
     return response.json()
+
+
+def _upload_file(file_path: str) -> dict[str, Any]:
+    """Upload a file to Redmine and return the upload token.
+
+    POSTs raw file bytes to /uploads.json with Content-Type: application/octet-stream.
+    """
+
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("Cannot upload empty file")
+
+    content_type, _ = mimetypes.guess_type(file_path)
+    if content_type is None:
+        content_type = "application/octet-stream"
+
+    url = f"{REDMINE_URL}/uploads.json"
+    with open(file_path, "rb") as f:
+        response = requests.post(
+            url,
+            headers={
+                "X-Redmine-API-Key": REDMINE_API_KEY,
+                "Content-Type": "application/octet-stream",
+            },
+            data=f.read(),
+            timeout=REQUEST_TIMEOUT,
+        )
+    response.raise_for_status()
+    data = response.json()
+    upload = data.get("upload", {})
+    return {
+        "token": upload.get("token"),
+        "filename": upload.get("filename", path.name),
+        "content_type": upload.get("content_type", content_type),
+    }
 
 
 def _extract_authenticity_token(html: str) -> str:
@@ -437,6 +478,63 @@ def create_project(
         "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
         "created_on": p.get("created_on"),
     }
+
+
+@mcp.tool()
+def add_issue_attachment(
+    issue_id: int,
+    file_path: str,
+    description: str = "",
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """Upload a file and attach it to an existing Redmine issue.
+
+    Two-step operation:
+    1. Uploads the file to Redmine (POST /uploads.json) to get an upload token
+    2. Attaches the token to the issue (PUT /issues/{id}.json)
+    """
+    upload = _upload_file(file_path)
+
+    issue: dict[str, Any] = {
+        "uploads": [
+            {
+                "token": upload["token"],
+                "filename": upload["filename"],
+                "content_type": content_type or upload["content_type"],
+            }
+        ],
+    }
+    if description:
+        issue["notes"] = description
+
+    _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
+
+    return {
+        "issue_id": issue_id,
+        "filename": upload["filename"],
+        "content_type": content_type or upload["content_type"],
+        "description": description,
+    }
+
+
+@mcp.tool()
+def list_issue_attachments(issue_id: int) -> list[dict[str, Any]]:
+    """Return all attachments on a Redmine issue with download URLs."""
+    data = _request("GET", f"/issues/{issue_id}.json?include=attachments")
+    attachments = data.get("issue", {}).get("attachments", [])
+    return [
+        {
+            "id": att.get("id"),
+            "filename": att.get("filename"),
+            "filesize": att.get("filesize"),
+            "content_type": att.get("content_type"),
+            "description": att.get("description"),
+            "content_url": att.get("content_url"),
+            "author": att.get("author", {}).get("name"),
+            "created_on": att.get("created_on"),
+        }
+        for att in attachments
+    ]
 
 
 if __name__ == "__main__":

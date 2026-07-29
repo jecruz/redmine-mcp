@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Redmine MCP Server — SSE + direct POST dual-mode (threaded)"""
-import json, os, sys, threading, queue, re
+import json, os, sys, threading, queue, re, mimetypes
+from pathlib import Path
 from html import unescape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -63,6 +64,44 @@ def _rm_request(method, path, api_key, **kwargs):
         log(f"Redmine error: {r.status_code} {r.text[:300]}")
         raise
     return r.json() if r.content else {}
+
+
+def _rm_upload_file(file_path, api_key):
+    """Upload a file to Redmine and return the upload token.
+
+    POSTs raw file bytes to /uploads.json with Content-Type: application/octet-stream.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("Cannot upload empty file")
+
+    content_type, _ = mimetypes.guess_type(file_path)
+    if content_type is None:
+        content_type = "application/octet-stream"
+
+    url = f"{REDMINE_URL}/uploads.json"
+    with open(file_path, "rb") as f:
+        r = requests.post(
+            url,
+            headers={
+                "X-Redmine-API-Key": api_key,
+                "Content-Type": "application/octet-stream",
+            },
+            data=f.read(),
+            timeout=REQUEST_TIMEOUT,
+        )
+    r.raise_for_status()
+    data = r.json()
+    upload = data.get("upload", {})
+    return {
+        "token": upload.get("token"),
+        "filename": upload.get("filename", path.name),
+        "content_type": upload.get("content_type", content_type),
+    }
 
 def _clean_issue(issue):
     return {
@@ -342,7 +381,14 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
                      "description": {"type": "string"}, "parent_id": {"type": "number"},
-                     "inherit_members": {"type": "boolean"}}}}]}
+                     "inherit_members": {"type": "boolean"}}}},
+                {"name": "add_issue_attachment", "description": "Upload a file and attach it to an existing Redmine issue",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"}, "file_path": {"type": "string"},
+                     "description": {"type": "string"}, "content_type": {"type": "string"}}}},
+                {"name": "list_issue_attachments", "description": "Return all attachments on a Redmine issue with download URLs",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -389,6 +435,12 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
                     args.get("parent_id"), args.get("inherit_members", True), api_key)
+            elif name == "add_issue_attachment":
+                return self._add_issue_attachment(
+                    args.get("issue_id"), args.get("file_path"),
+                    args.get("description", ""), args.get("content_type"), api_key)
+            elif name == "list_issue_attachments":
+                return self._list_issue_attachments(args.get("issue_id"), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -499,6 +551,49 @@ class MCPHandler(BaseHTTPRequestHandler):
             "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
             "created_on": p.get("created_on"),
         }
+
+    def _add_issue_attachment(self, issue_id, file_path, description, content_type, api_key):
+        """Upload a file and attach it to an existing Redmine issue."""
+        upload = _rm_upload_file(file_path, api_key)
+
+        issue = {
+            "uploads": [
+                {
+                    "token": upload["token"],
+                    "filename": upload["filename"],
+                    "content_type": content_type or upload["content_type"],
+                }
+            ],
+        }
+        if description:
+            issue["notes"] = description
+
+        _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+
+        return {
+            "issue_id": issue_id,
+            "filename": upload["filename"],
+            "content_type": content_type or upload["content_type"],
+            "description": description,
+        }
+
+    def _list_issue_attachments(self, issue_id, api_key):
+        """Return all attachments on a Redmine issue with download URLs."""
+        data = _rm_request("GET", f"/issues/{issue_id}.json?include=attachments", api_key)
+        attachments = data.get("issue", {}).get("attachments", [])
+        return [
+            {
+                "id": att.get("id"),
+                "filename": att.get("filename"),
+                "filesize": att.get("filesize"),
+                "content_type": att.get("content_type"),
+                "description": att.get("description"),
+                "content_url": att.get("content_url"),
+                "author": att.get("author", {}).get("name"),
+                "created_on": att.get("created_on"),
+            }
+            for att in attachments
+        ]
 
     def log_message(self, f, *args):
         pass
