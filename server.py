@@ -384,6 +384,10 @@ def create_issue(
     priority_id: int = 2,
     status_id: int = 1,
     allow_idea_tracker: bool = False,
+    category_id: int | None = None,
+    due_date: str | None = None,
+    start_date: str | None = None,
+    estimated_hours: float | None = None,
 ) -> dict[str, Any]:
     """Create a Redmine issue."""
     _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
@@ -397,6 +401,14 @@ def create_issue(
     }
     if assigned_to_id is not None:
         issue["assigned_to_id"] = assigned_to_id
+    if category_id is not None:
+        issue["category_id"] = category_id
+    if due_date is not None:
+        issue["due_date"] = due_date
+    if start_date is not None:
+        issue["start_date"] = start_date
+    if estimated_hours is not None:
+        issue["estimated_hours"] = estimated_hours
 
     data = _request("POST", "/issues.json", json={"issue": issue})
     created_issue = data.get("issue", {})
