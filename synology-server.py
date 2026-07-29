@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Redmine MCP Server — SSE + direct POST dual-mode (threaded)"""
 import json, os, sys, threading, queue, re
+from datetime import datetime, timezone
 from html import unescape
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from socketserver import ThreadingMixIn
 import requests
 
@@ -12,6 +14,13 @@ PORT = int(os.getenv("PORT", "8095"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 AGENT_TASK_TRACKER_ID = 3
 IDEA_TRACKER_ID = 6
+REDMINE_AGENT_ID = os.getenv("REDMINE_AGENT_ID", "")
+DELETE_AUDIT_LOG_PATH = Path(
+    os.getenv(
+        "REDMINE_DELETE_AUDIT_LOG",
+        str(Path.home() / ".hermes" / "logs" / "redmine-mcp-deletes.log"),
+    )
+)
 
 REDMINE_WEB_USERNAME = os.getenv("REDMINE_WEB_USERNAME", "")
 REDMINE_WEB_PASSWORD = os.getenv("REDMINE_WEB_PASSWORD", "")
@@ -342,7 +351,12 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
                      "description": {"type": "string"}, "parent_id": {"type": "number"},
-                     "inherit_members": {"type": "boolean"}}}}]}
+                     "inherit_members": {"type": "boolean"}}}},
+                {"name": "delete_issue", "description": "Delete a Redmine issue. Requires confirm=True or dry_run=True for safety.",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"},
+                     "confirm": {"type": "boolean"},
+                     "dry_run": {"type": "boolean"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -389,6 +403,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
                     args.get("parent_id"), args.get("inherit_members", True), api_key)
+            elif name == "delete_issue":
+                return self._delete_issue(
+                    args.get("issue_id"), args.get("confirm", False),
+                    args.get("dry_run", False), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -498,6 +516,78 @@ class MCPHandler(BaseHTTPRequestHandler):
             "description": p.get("description"),
             "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
             "created_on": p.get("created_on"),
+        }
+
+    def _delete_issue(self, issue_id, confirm, dry_run, api_key):
+        if confirm == dry_run:
+            raise ValueError(
+                "Exactly one of confirm=True or dry_run=True must be set. "
+                "Set dry_run=True to preview, confirm=True to actually delete."
+            )
+        if dry_run:
+            try:
+                issue = self._get_issue(issue_id, "", api_key)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    return {
+                        "deleted": False, "id": issue_id, "dry_run": True,
+                        "status": "not_found",
+                        "message": f"Issue #{issue_id} does not exist — nothing to delete.",
+                    }
+                raise
+            return {
+                "deleted": False, "id": issue_id, "dry_run": True,
+                "status": "found",
+                "message": f"Would delete issue #{issue_id}: {issue.get('subject', '')}",
+                "issue": {
+                    "id": issue.get("id"), "subject": issue.get("subject"),
+                    "project": issue.get("project"), "tracker": issue.get("tracker"),
+                    "status": issue.get("status"), "author": issue.get("author"),
+                },
+            }
+
+        # confirm=True: perform the actual deletion
+        delete_url = f"{REDMINE_URL}/issues/{issue_id}.json"
+        try:
+            response = requests.delete(
+                delete_url,
+                headers=_rm_headers(api_key),
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            if exc.response is not None:
+                if exc.response.status_code == 404:
+                    return {
+                        "deleted": False, "id": issue_id,
+                        "status": "not_found",
+                        "message": f"Issue #{issue_id} does not exist.",
+                    }
+                if exc.response.status_code == 403:
+                    return {
+                        "deleted": False, "id": issue_id,
+                        "status": "forbidden",
+                        "message": (
+                            f"Permission denied deleting issue #{issue_id}. "
+                            "You must be an admin or the issue author with delete permission."
+                        ),
+                    }
+            raise
+
+        # Write audit log
+        DELETE_AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        audit_line = (
+            f"{timestamp} | agent_id={REDMINE_AGENT_ID} | "
+            f"DELETED issue_id={issue_id}\n"
+        )
+        with open(DELETE_AUDIT_LOG_PATH, "a") as f:
+            f.write(audit_line)
+
+        return {
+            "deleted": True, "id": issue_id,
+            "status": "deleted",
+            "message": f"Issue #{issue_id} deleted.",
         }
 
     def log_message(self, f, *args):
