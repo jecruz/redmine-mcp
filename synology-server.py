@@ -410,7 +410,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"},
                      "confirm": {"type": "boolean"},
-                     "dry_run": {"type": "boolean"}}}}]}
+                     "dry_run": {"type": "boolean"}}}},
+                {"name": "list_memberships", "description": "List project memberships with roles for permission diagnostics",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "user_id": {"type": "number"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -489,6 +492,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._delete_issue(
                     args.get("issue_id"), args.get("confirm", False),
                     args.get("dry_run", False), api_key)
+            elif name == "list_memberships":
+                return self._list_memberships(args.get("project_id"), args.get("user_id"), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -863,6 +868,33 @@ class MCPHandler(BaseHTTPRequestHandler):
             "message": f"Issue #{issue_id} deleted.",
         }
 
+    def _list_memberships(self, project_id, user_id, api_key):
+        data = _rm_request("GET", f"/projects/{project_id}/memberships.json", api_key)
+        memberships = data.get("memberships", [])
+        result = []
+        for membership in memberships:
+            entry = {
+                "id": membership.get("id"),
+                "user": {
+                    "id": (membership.get("user") or {}).get("id"),
+                    "name": (membership.get("user") or {}).get("name"),
+                },
+                "roles": [
+                    {"id": role.get("id"), "name": role.get("name")}
+                    for role in (membership.get("roles") or [])
+                ],
+            }
+            if user_id is not None:
+                if entry["user"]["id"] == user_id:
+                    result.append(entry)
+                    break
+            else:
+                result.append(entry)
+        return {
+            "project_id": project_id,
+            "total_count": len(result),
+            "memberships": result,
+        }
     def log_message(self, f, *args):
         pass
 
