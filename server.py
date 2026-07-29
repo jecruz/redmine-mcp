@@ -230,6 +230,20 @@ def get_current_user() -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_priorities() -> list[dict[str, Any]]:
+    """List issue priorities configured on the Redmine instance."""
+    data = _request("GET", "/enumerations/issue_priorities.json")
+    return [
+        {
+            "id": priority.get("id"),
+            "name": priority.get("name"),
+            "is_default": priority.get("is_default", False),
+        }
+        for priority in data.get("issue_priorities", [])
+    ]
+
+
+@mcp.tool()
 def list_projects(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List visible Redmine projects."""
     data = _request("GET", f"/projects.json?limit={limit}&offset={offset}")

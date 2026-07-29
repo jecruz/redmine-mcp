@@ -338,6 +338,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "title": {"type": "string"},
                      "description": {"type": "string"}, "category_id": {"type": "number"}}}},
+                {"name": "list_priorities", "description": "List issue priorities configured on the Redmine instance",
+                 "inputSchema": {"type": "object", "properties": {}}},
                 {"name": "create_project", "description": "Create a new Redmine project",
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
@@ -385,6 +387,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_document(
                     args.get("project_id"), args.get("title"), args.get("description", ""),
                     args.get("category_id"), api_key)
+            elif name == "list_priorities":
+                return self._list_priorities(api_key)
             elif name == "create_project":
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
@@ -479,6 +483,17 @@ class MCPHandler(BaseHTTPRequestHandler):
     def _create_document(self, project_id, title, description, category_id, api_key):
         project_identifier = _resolve_project_identifier(project_id, api_key)
         return _create_document_web(project_identifier, title, description, category_id)
+
+    def _list_priorities(self, api_key):
+        data = _rm_request("GET", "/enumerations/issue_priorities.json", api_key)
+        return [
+            {
+                "id": priority.get("id"),
+                "name": priority.get("name"),
+                "is_default": priority.get("is_default", False),
+            }
+            for priority in data.get("issue_priorities", [])
+        ]
 
     def _create_project(self, name, identifier, description, parent_id, inherit_members, api_key):
         project = {
