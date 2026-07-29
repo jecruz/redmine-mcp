@@ -284,6 +284,35 @@ def list_issues(
 
 
 @mcp.tool()
+def list_trackers(project_id: int | None = None) -> dict[str, Any]:
+    """List Redmine trackers, optionally filtered by project."""
+    data = _request("GET", "/trackers.json")
+    all_trackers = data.get("trackers", [])
+
+    if project_id is None:
+        return {
+            "total_count": len(all_trackers),
+            "trackers": [
+                {"id": t.get("id"), "name": t.get("name")}
+                for t in all_trackers
+            ],
+        }
+
+    project_data = _request("GET", f"/projects/{project_id}.json?include=trackers")
+    project_trackers = project_data.get("project", {}).get("trackers", [])
+    tracker_ids = {t.get("id") for t in project_trackers}
+
+    filtered = [t for t in all_trackers if t.get("id") in tracker_ids]
+    return {
+        "total_count": len(filtered),
+        "trackers": [
+            {"id": t.get("id"), "name": t.get("name")}
+            for t in filtered
+        ],
+    }
+
+
+@mcp.tool()
 def get_issue(issue_id: int, include: str = "journals,attachments,relations") -> dict[str, Any]:
     """Fetch one Redmine issue with optional include expansions."""
     data = _request("GET", f"/issues/{issue_id}.json?include={include}")

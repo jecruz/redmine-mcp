@@ -338,6 +338,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "title": {"type": "string"},
                      "description": {"type": "string"}, "category_id": {"type": "number"}}}},
+                {"name": "list_trackers", "description": "List Redmine trackers, optionally filtered by project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}}}},
                 {"name": "create_project", "description": "Create a new Redmine project",
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
@@ -385,6 +388,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_document(
                     args.get("project_id"), args.get("title"), args.get("description", ""),
                     args.get("category_id"), api_key)
+            elif name == "list_trackers":
+                return self._list_trackers(args.get("project_id"), api_key)
             elif name == "create_project":
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
@@ -479,6 +484,32 @@ class MCPHandler(BaseHTTPRequestHandler):
     def _create_document(self, project_id, title, description, category_id, api_key):
         project_identifier = _resolve_project_identifier(project_id, api_key)
         return _create_document_web(project_identifier, title, description, category_id)
+
+    def _list_trackers(self, project_id, api_key):
+        data = _rm_request("GET", "/trackers.json", api_key)
+        all_trackers = data.get("trackers", [])
+
+        if project_id is None:
+            return {
+                "total_count": len(all_trackers),
+                "trackers": [
+                    {"id": t.get("id"), "name": t.get("name")}
+                    for t in all_trackers
+                ],
+            }
+
+        project_data = _rm_request("GET", f"/projects/{project_id}.json?include=trackers", api_key)
+        project_trackers = project_data.get("project", {}).get("trackers", [])
+        tracker_ids = {t.get("id") for t in project_trackers}
+
+        filtered = [t for t in all_trackers if t.get("id") in tracker_ids]
+        return {
+            "total_count": len(filtered),
+            "trackers": [
+                {"id": t.get("id"), "name": t.get("name")}
+                for t in filtered
+            ],
+        }
 
     def _create_project(self, name, identifier, description, parent_id, inherit_members, api_key):
         project = {
