@@ -402,6 +402,27 @@ def create_document(
 
 
 @mcp.tool()
+def list_issue_categories(project_id: int) -> list[dict[str, Any]]:
+    """List the issue categories defined on a Redmine project.
+
+    Returns one entry per category with ``id``, ``name``, ``project_id``, and
+    ``assigned_to_id`` (when the category has a default assignee). Empty list
+    when the project has no categories.
+    """
+    data = _request("GET", f"/projects/{project_id}.json?include=issue_categories")
+    categories = data.get("project", {}).get("issue_categories", [])
+    return [
+        {
+            "id": category.get("id"),
+            "name": category.get("name"),
+            "project_id": (category.get("project") or {}).get("id"),
+            "assigned_to_id": (category.get("assigned_to") or {}).get("id"),
+        }
+        for category in categories
+    ]
+
+
+@mcp.tool()
 def create_project(
     name: str,
     identifier: str,
