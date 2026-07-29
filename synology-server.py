@@ -342,7 +342,13 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
                      "description": {"type": "string"}, "parent_id": {"type": "number"},
-                     "inherit_members": {"type": "boolean"}}}}]}
+                     "inherit_members": {"type": "boolean"}}}},
+                {"name": "search_projects", "description": "Search visible Redmine projects by case-insensitive substring of name, identifier, or description",
+                 "inputSchema": {"type": "object", "properties": {
+                     "query": {"type": "string"}, "limit": {"type": "number"}, "offset": {"type": "number"}}}},
+                {"name": "resolve_project", "description": "Resolve a Redmine project by numeric id, identifier, or name. Returns canonical {id, name, identifier}.",
+                 "inputSchema": {"type": "object", "properties": {
+                     "identifier_or_name": {"type": "string"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -389,6 +395,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
                     args.get("parent_id"), args.get("inherit_members", True), api_key)
+            elif name == "search_projects":
+                return self._search_projects(args.get("query", ""), args.get("limit", 100), args.get("offset", 0), api_key)
+            elif name == "resolve_project":
+                return self._resolve_project(args.get("identifier_or_name", ""), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -499,6 +509,88 @@ class MCPHandler(BaseHTTPRequestHandler):
             "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
             "created_on": p.get("created_on"),
         }
+
+    def _search_projects(self, query, limit, offset, api_key):
+        """Mirror of server.py search_projects: client-side case-insensitive filter."""
+        needle = query.strip().lower()
+        data = _rm_request("GET", f"/projects.json?limit={limit}&offset={offset}", api_key)
+        projects = data.get("projects", []) or []
+        matches = []
+        for project in projects:
+            haystacks = [
+                str(project.get("name") or ""),
+                str(project.get("identifier") or ""),
+                str(project.get("description") or ""),
+            ]
+            if any(needle in hay.lower() for hay in haystacks):
+                matches.append({
+                    "id": project.get("id"),
+                    "identifier": project.get("identifier"),
+                    "name": project.get("name"),
+                    "parent": (project.get("parent") or {}).get("name"),
+                    "description": project.get("description"),
+                })
+        return {
+            "total_count": data.get("total_count", len(projects)),
+            "query": query,
+            "matches": matches,
+        }
+
+    def _resolve_project(self, identifier_or_name, api_key):
+        """Mirror of server.py resolve_project: resolve by id, identifier, or name."""
+        # 1. Numeric → fetch directly by id
+        if isinstance(identifier_or_name, int) or (
+            isinstance(identifier_or_name, str) and identifier_or_name.isdigit()
+        ):
+            project_id = int(identifier_or_name)
+            try:
+                data = _rm_request("GET", f"/projects/{project_id}.json", api_key)
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status == 404:
+                    raise RuntimeError(f"Redmine project id {project_id} not found") from exc
+                raise
+            project = data.get("project", {})
+            if project.get("id") is None:
+                raise RuntimeError(f"Redmine project id {project_id} not found")
+            return {
+                "id": project.get("id"),
+                "identifier": project.get("identifier"),
+                "name": project.get("name"),
+                "parent": (project.get("parent") or {}).get("name"),
+                "description": project.get("description"),
+            }
+
+        needle = str(identifier_or_name).strip().lower()
+        if not needle:
+            raise RuntimeError("identifier_or_name must not be empty")
+
+        projects = _rm_request("GET", "/projects.json?limit=100", api_key).get("projects", []) or []
+
+        for project in projects:
+            identifier = str(project.get("identifier") or "")
+            if needle == identifier.lower():
+                return {
+                    "id": project.get("id"),
+                    "identifier": project.get("identifier"),
+                    "name": project.get("name"),
+                    "parent": (project.get("parent") or {}).get("name"),
+                    "description": project.get("description"),
+                }
+        for project in projects:
+            name = str(project.get("name") or "")
+            if needle == name.lower():
+                return {
+                    "id": project.get("id"),
+                    "identifier": project.get("identifier"),
+                    "name": project.get("name"),
+                    "parent": (project.get("parent") or {}).get("name"),
+                    "description": project.get("description"),
+                }
+
+        raise RuntimeError(
+            f"Redmine project '{identifier_or_name}' not found by id, identifier, or name"
+        )
 
     def log_message(self, f, *args):
         pass

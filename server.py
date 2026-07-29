@@ -229,6 +229,17 @@ def get_current_user() -> dict[str, Any]:
     }
 
 
+def _clean_project(project: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical subset of project fields used by MCP tools."""
+    return {
+        "id": project.get("id"),
+        "identifier": project.get("identifier"),
+        "name": project.get("name"),
+        "parent": (project.get("parent") or {}).get("name"),
+        "description": project.get("description"),
+    }
+
+
 @mcp.tool()
 def list_projects(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List visible Redmine projects."""
@@ -236,17 +247,87 @@ def list_projects(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     projects = data.get("projects", [])
     return {
         "total_count": data.get("total_count", len(projects)),
-        "projects": [
-            {
-                "id": project.get("id"),
-                "identifier": project.get("identifier"),
-                "name": project.get("name"),
-                "parent": project.get("parent", {}).get("name"),
-                "description": project.get("description"),
-            }
-            for project in projects
-        ],
+        "projects": [_clean_project(project) for project in projects],
     }
+
+
+@mcp.tool()
+def search_projects(
+    query: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Search visible Redmine projects by case-insensitive substring of name, identifier, or description.
+
+    Returns an empty list when nothing matches. Each match contains at least ``id``,
+    ``name``, and ``identifier``.
+    """
+    needle = query.strip().lower()
+    data = _request(
+        "GET",
+        f"/projects.json?limit={limit}&offset={offset}",
+    )
+    projects = data.get("projects", []) or []
+    matches: list[dict[str, Any]] = []
+    for project in projects:
+        haystacks = [
+            str(project.get("name") or ""),
+            str(project.get("identifier") or ""),
+            str(project.get("description") or ""),
+        ]
+        if any(needle in hay.lower() for hay in haystacks):
+            matches.append(_clean_project(project))
+    return {
+        "total_count": data.get("total_count", len(projects)),
+        "query": query,
+        "matches": matches,
+    }
+
+
+@mcp.tool()
+def resolve_project(identifier_or_name: str | int) -> dict[str, Any]:
+    """Resolve a Redmine project by numeric id, identifier, or name.
+
+    Returns the canonical ``{id, name, identifier}`` triple for an exact match.
+    Numeric inputs are looked up by id; everything else is matched case-insensitively
+    first against ``identifier``, then against ``name``. Raises when no exact match
+    exists.
+    """
+    projects = _request("GET", "/projects.json?limit=100").get("projects", []) or []
+
+    # 1. Numeric → fetch directly by id so we always return a definitive record.
+    if isinstance(identifier_or_name, int) or (
+        isinstance(identifier_or_name, str) and identifier_or_name.isdigit()
+    ):
+        project_id = int(identifier_or_name)
+        try:
+            data = _request("GET", f"/projects/{project_id}.json")
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                raise RuntimeError(f"Redmine project id {project_id} not found") from exc
+            raise
+        project = _clean_project(data.get("project", {}))
+        if project.get("id") is None:
+            raise RuntimeError(f"Redmine project id {project_id} not found")
+        return project
+
+    needle = identifier_or_name.strip().lower()
+    if not needle:
+        raise RuntimeError("identifier_or_name must not be empty")
+
+    for project in projects:
+        identifier = str(project.get("identifier") or "")
+        if needle == identifier.lower():
+            return _clean_project(project)
+    for project in projects:
+        name = str(project.get("name") or "")
+        if needle == name.lower():
+            return _clean_project(project)
+
+    raise RuntimeError(
+        f"Redmine project '{identifier_or_name}' not found by id, identifier, or name"
+    )
 
 
 @mcp.tool()
