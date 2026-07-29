@@ -28,6 +28,7 @@ Instance env files live under `/Users/jeffreycruz/Development/agent-zero-data/<i
 
 - `get_current_user` — Return the Redmine user for the configured API key
 - `list_projects` — List visible Redmine projects
+- `list_issue_statuses` — List issue statuses available to the authenticated user for a project (optional project_id, optional is_closed filter for terminal-only)
 - `list_issues` — List issues with optional filters (project_id, assigned_to_id, status_id, tracker_id)
 - `get_issue` — Fetch a single issue with journals, attachments, relations
 - `create_issue` — Create a new Redmine issue

@@ -271,6 +271,27 @@ def list_projects(limit: int = 100, offset: int = 0) -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_issue_statuses(
+    project_id: int | None = None,
+    is_closed: bool | None = None,
+) -> list[dict[str, Any]]:
+    """List issue statuses available to the authenticated user for a project."""
+    params = {"project_id": project_id} if project_id is not None else {}
+    data = _request("GET", "/issue_statuses.json", params=params)
+    statuses = [
+        {
+            "id": status.get("id"),
+            "name": status.get("name"),
+            "is_closed": status.get("is_closed", False),
+        }
+        for status in data.get("issue_statuses", [])
+    ]
+    if is_closed is not None:
+        statuses = [status for status in statuses if status["is_closed"] is is_closed]
+    return statuses
+
+
+@mcp.tool()
 def list_issues(
     project_id: int | None = None,
     assigned_to_id: str | int | None = None,
