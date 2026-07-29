@@ -304,6 +304,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                 {"name": "list_projects", "description": "List visible Redmine projects",
                  "inputSchema": {"type": "object", "properties": {
                      "limit": {"type": "number"}, "offset": {"type": "number"}}}},
+                {"name": "list_issue_statuses", "description": "List issue statuses available to the authenticated user for a project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "is_closed": {"type": "boolean"}}}},
                 {"name": "list_issues", "description": "List Redmine issues with optional filters",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "assigned_to_id": {"type": "string"},
@@ -358,6 +361,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._get_current_user(api_key)
             elif name == "list_projects":
                 return self._list_projects(args.get("limit", 100), args.get("offset", 0), api_key)
+            elif name == "list_issue_statuses":
+                return self._list_issue_statuses(
+                    args.get("project_id"), args.get("is_closed"), api_key)
             elif name == "list_issues":
                 return self._list_issues(
                     args.get("project_id"), args.get("assigned_to_id"),
@@ -406,6 +412,16 @@ class MCPHandler(BaseHTTPRequestHandler):
                 "projects": [{"id": p.get("id"), "identifier": p.get("identifier"),
                               "name": p.get("name"), "parent": (p.get("parent") or {}).get("name"),
                               "description": p.get("description")} for p in projects]}
+
+    def _list_issue_statuses(self, project_id, is_closed, api_key):
+        params = {"project_id": project_id} if project_id is not None else {}
+        data = _rm_request("GET", "/issue_statuses.json", api_key, params=params)
+        statuses = [{"id": status.get("id"), "name": status.get("name"),
+                     "is_closed": status.get("is_closed", False)}
+                    for status in data.get("issue_statuses", [])]
+        if is_closed is not None:
+            statuses = [status for status in statuses if status["is_closed"] is is_closed]
+        return statuses
 
     def _list_issues(self, project_id, assigned_to_id, status_id, tracker_id, limit, offset, api_key):
         params = {"limit": limit, "offset": offset}
