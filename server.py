@@ -61,6 +61,27 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
     return response.json()
 
 
+def _wiki_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    """Like _request but surfaces HTTP 409 for version-conflict detection."""
+    url = f"{REDMINE_URL}{path}"
+    response = requests.request(
+        method,
+        url,
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+        **kwargs,
+    )
+    if response.status_code == 409:
+        raise RuntimeError(
+            "Wiki page version conflict: the page has been modified since you last read it. "
+            "Re-read the page and retry with the current version."
+        )
+    response.raise_for_status()
+    if not response.content:
+        return {}
+    return response.json()
+
+
 def _extract_authenticity_token(html: str) -> str:
     match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html)
     if not match:
@@ -264,6 +285,27 @@ def list_projects(limit: int = 100, offset: int = 0) -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_issue_statuses(
+    project_id: int | None = None,
+    is_closed: bool | None = None,
+) -> list[dict[str, Any]]:
+    """List issue statuses available to the authenticated user for a project."""
+    params = {"project_id": project_id} if project_id is not None else {}
+    data = _request("GET", "/issue_statuses.json", params=params)
+    statuses = [
+        {
+            "id": status.get("id"),
+            "name": status.get("name"),
+            "is_closed": status.get("is_closed", False),
+        }
+        for status in data.get("issue_statuses", [])
+    ]
+    if is_closed is not None:
+        statuses = [status for status in statuses if status["is_closed"] is is_closed]
+    return statuses
+
+
+@mcp.tool()
 def list_issues(
     project_id: int | None = None,
     assigned_to_id: str | int | None = None,
@@ -298,6 +340,35 @@ def list_issues(
 
 
 @mcp.tool()
+def list_trackers(project_id: int | None = None) -> dict[str, Any]:
+    """List Redmine trackers, optionally filtered by project."""
+    data = _request("GET", "/trackers.json")
+    all_trackers = data.get("trackers", [])
+
+    if project_id is None:
+        return {
+            "total_count": len(all_trackers),
+            "trackers": [
+                {"id": t.get("id"), "name": t.get("name")}
+                for t in all_trackers
+            ],
+        }
+
+    project_data = _request("GET", f"/projects/{project_id}.json?include=trackers")
+    project_trackers = project_data.get("project", {}).get("trackers", [])
+    tracker_ids = {t.get("id") for t in project_trackers}
+
+    filtered = [t for t in all_trackers if t.get("id") in tracker_ids]
+    return {
+        "total_count": len(filtered),
+        "trackers": [
+            {"id": t.get("id"), "name": t.get("name")}
+            for t in filtered
+        ],
+    }
+
+
+@mcp.tool()
 def get_issue(issue_id: int, include: str = "journals,attachments,relations") -> dict[str, Any]:
     """Fetch one Redmine issue with optional include expansions."""
     data = _request("GET", f"/issues/{issue_id}.json?include={include}")
@@ -327,6 +398,10 @@ def create_issue(
     priority_id: int = 2,
     status_id: int = 1,
     allow_idea_tracker: bool = False,
+    category_id: int | None = None,
+    due_date: str | None = None,
+    start_date: str | None = None,
+    estimated_hours: float | None = None,
 ) -> dict[str, Any]:
     """Create a Redmine issue."""
     _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
@@ -340,6 +415,14 @@ def create_issue(
     }
     if assigned_to_id is not None:
         issue["assigned_to_id"] = assigned_to_id
+    if category_id is not None:
+        issue["category_id"] = category_id
+    if due_date is not None:
+        issue["due_date"] = due_date
+    if start_date is not None:
+        issue["start_date"] = start_date
+    if estimated_hours is not None:
+        issue["estimated_hours"] = estimated_hours
 
     data = _request("POST", "/issues.json", json={"issue": issue})
     created_issue = data.get("issue", {})
@@ -416,6 +499,27 @@ def create_document(
 
 
 @mcp.tool()
+def list_issue_categories(project_id: int) -> list[dict[str, Any]]:
+    """List the issue categories defined on a Redmine project.
+
+    Returns one entry per category with ``id``, ``name``, ``project_id``, and
+    ``assigned_to_id`` (when the category has a default assignee). Empty list
+    when the project has no categories.
+    """
+    data = _request("GET", f"/projects/{project_id}.json?include=issue_categories")
+    categories = data.get("project", {}).get("issue_categories", [])
+    return [
+        {
+            "id": category.get("id"),
+            "name": category.get("name"),
+            "project_id": (category.get("project") or {}).get("id"),
+            "assigned_to_id": (category.get("assigned_to") or {}).get("id"),
+        }
+        for category in categories
+    ]
+
+
+@mcp.tool()
 def create_project(
     name: str,
     identifier: str,
@@ -451,6 +555,102 @@ def create_project(
         "parent_id": p.get("parent", {}).get("id") if p.get("parent") else None,
         "created_on": p.get("created_on"),
     }
+
+
+@mcp.tool()
+def list_wiki_pages(project_id: int) -> list[dict[str, Any]]:
+    """List all wiki pages in a Redmine project."""
+    data = _request("GET", f"/projects/{project_id}/wiki/index.json")
+    return data.get("wiki_pages", [])
+
+
+@mcp.tool()
+def get_wiki_page(
+    project_id: int,
+    title: str,
+    version: int | None = None,
+) -> dict[str, Any]:
+    """Get a Redmine wiki page by title, optionally at a specific version.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title (e.g. "Home", "ADRs")
+        version: Optional version number to retrieve a specific revision
+    """
+    path = f"/projects/{project_id}/wiki/{title}.json"
+    params: dict[str, Any] = {}
+    if version is not None:
+        params["version"] = version
+    data = _request("GET", path, params=params)
+    return data.get("wiki_page", {})
+
+
+@mcp.tool()
+def create_wiki_page(
+    project_id: int,
+    title: str,
+    text: str,
+    parent_title: str | None = None,
+    comments: str = "",
+) -> dict[str, Any]:
+    """Create a new wiki page in a Redmine project.
+
+    Redmine uses PUT for wiki page creation. If a page with the same title
+    already exists, this will update it rather than create a new one — use
+    the returned version number to distinguish.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title
+        text: Wiki page content (textile or markdown depending on project)
+        parent_title: Optional parent wiki page title for hierarchy
+        comments: Optional change comment
+    """
+    wiki_page: dict[str, Any] = {
+        "text": text,
+        "comments": comments,
+    }
+    if parent_title is not None:
+        wiki_page["parent_title"] = parent_title
+    data = _wiki_request(
+        "PUT",
+        f"/projects/{project_id}/wiki/{title}.json",
+        json={"wiki_page": wiki_page},
+    )
+    return data.get("wiki_page", {})
+
+
+@mcp.tool()
+def update_wiki_page(
+    project_id: int,
+    title: str,
+    text: str,
+    version: int | None = None,
+    comments: str = "",
+) -> dict[str, Any]:
+    """Update an existing wiki page with optimistic concurrency control.
+
+    Args:
+        project_id: Redmine project id
+        title: Wiki page title
+        text: New wiki page content
+        version: Current version number for optimistic concurrency.
+                 If provided and it doesn't match the server's current version,
+                 a 409 error is raised.
+        comments: Optional change comment
+    """
+    wiki_page: dict[str, Any] = {
+        "text": text,
+        "comments": comments,
+    }
+    if version is not None:
+        wiki_page["version"] = version
+    data = _wiki_request(
+        "PUT",
+        f"/projects/{project_id}/wiki/{title}.json",
+        json={"wiki_page": wiki_page},
+    )
+    return data.get("wiki_page", {})
 
 
 if __name__ == "__main__":
