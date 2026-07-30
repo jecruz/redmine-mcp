@@ -530,6 +530,15 @@ class MCPHandler(BaseHTTPRequestHandler):
         issue = {"status_id": status_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+        # PUT returns 204 No Content; re-fetch and verify status_id matches.
+        updated = _rm_request("GET", f"/issues/{issue_id}.json", api_key)
+        issue_body = updated.get("issue", {}) if isinstance(updated.get("issue"), dict) else {}
+        actual_status_id = (issue_body.get("status") or {}).get("id")
+        if actual_status_id is not None and int(actual_status_id) != int(status_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
+                f"Redmine returned status_id {actual_status_id}"
+            )
         return self._get_issue(issue_id, "journals", api_key)
 
     def _move_issue(self, issue_id, project_id, note, api_key):
