@@ -14,6 +14,7 @@ REDMINE_URL = os.getenv("REDMINE_URL", "http://10.0.0.23:8085").rstrip("/")
 DEFAULT_REDMINE_API_KEY = os.getenv("REDMINE_API_KEY", "")
 PORT = int(os.getenv("PORT", "8095"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+MAX_ATTACHMENT_BYTES = int(os.getenv("MAX_ATTACHMENT_BYTES", str(50 * 1024 * 1024)))
 AGENT_TASK_TRACKER_ID = 3
 IDEA_TRACKER_ID = 6
 REDMINE_AGENT_ID = os.getenv("REDMINE_AGENT_ID", "")
@@ -27,6 +28,78 @@ DELETE_AUDIT_LOG_PATH = Path(
 REDMINE_WEB_USERNAME = os.getenv("REDMINE_WEB_USERNAME", "")
 REDMINE_WEB_PASSWORD = os.getenv("REDMINE_WEB_PASSWORD", "")
 REDMINE_WEB_SESSION_COOKIE = os.getenv("REDMINE_WEB_SESSION_COOKIE", "")
+
+_REDMINE_ERROR_PAYLOAD_LIMIT = 500
+
+
+class RedmineMCPError(Exception):
+    """Base class for failures returned by the Redmine API."""
+
+    def __init__(self, message, *, status_code=None, redmine_payload=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.redmine_payload = redmine_payload
+
+
+class RedminePermissionError(RedmineMCPError):
+    """Redmine rejected the request because the caller lacks permission."""
+
+
+class RedmineNotFoundError(RedmineMCPError):
+    """Redmine could not find the requested resource."""
+
+
+class RedmineValidationError(RedmineMCPError):
+    """Redmine rejected request fields or a workflow transition."""
+
+    def __init__(self, message, *, errors=None, status_code=None, redmine_payload=None):
+        super().__init__(message, status_code=status_code, redmine_payload=redmine_payload)
+        self.errors = list(errors or [])
+
+
+class RedmineWorkflowError(RedmineMCPError):
+    """The requested mutation did not produce the requested persisted state."""
+
+
+def _truncate_payload(payload, limit=_REDMINE_ERROR_PAYLOAD_LIMIT):
+    """Bound payload text used in exception messages without discarding details."""
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload[:limit]
+    try:
+        return json.dumps(payload)[:limit]
+    except (TypeError, ValueError):
+        return repr(payload)[:limit]
+
+
+def _raise_for_redmine_response(response):
+    """Raise a typed exception for a non-successful Redmine response."""
+    try:
+        parsed = response.json() if response.content else None
+    except ValueError:
+        parsed = None
+    payload = parsed if isinstance(parsed, dict) else (response.text or None)
+    detail = _truncate_payload(payload)
+    status = response.status_code
+    if status in (401, 403):
+        raise RedminePermissionError(f"Redmine permission denied (HTTP {status}): {detail}", status_code=status, redmine_payload=payload)
+    if status == 404:
+        raise RedmineNotFoundError(f"Redmine resource not found (HTTP 404): {detail}", status_code=status, redmine_payload=payload)
+    if status == 409:
+        raise RedmineWorkflowError(f"Redmine conflict (HTTP 409): {detail}", status_code=status, redmine_payload=payload)
+    if status == 422:
+        raw_errors = parsed.get("errors") if isinstance(parsed, dict) else []
+        if isinstance(raw_errors, dict):
+            errors = [f"{field}: {message}" for field, messages in raw_errors.items() for message in (messages if isinstance(messages, list) else [messages])]
+        elif isinstance(raw_errors, list):
+            errors = [str(error) for error in raw_errors]
+        elif raw_errors:
+            errors = [str(raw_errors)]
+        else:
+            errors = []
+        raise RedmineValidationError(f"Redmine validation failed (HTTP 422): {detail}", errors=errors, status_code=status, redmine_payload=payload)
+    raise RedmineMCPError(f"Redmine request failed (HTTP {status}): {detail}", status_code=status, redmine_payload=payload)
 
 _sse_queues = []
 _sse_lock = threading.Lock()
@@ -76,11 +149,8 @@ def _warn_deprecated_mutation(name, replacement):
 def _rm_request(method, path, api_key, **kwargs):
     url = f"{REDMINE_URL}{path}"
     r = requests.request(method, url, headers=_rm_headers(api_key), timeout=REQUEST_TIMEOUT, **kwargs)
-    try:
-        r.raise_for_status()
-    except Exception:
-        log(f"Redmine error: {r.status_code} {r.text[:300]}")
-        raise
+    if r.status_code >= 400:
+        _raise_for_redmine_response(r)
     return r.json() if r.content else {}
 
 
@@ -89,15 +159,12 @@ def _rm_wiki_request(method, path, api_key, **kwargs):
     url = f"{REDMINE_URL}{path}"
     r = requests.request(method, url, headers=_rm_headers(api_key), timeout=REQUEST_TIMEOUT, **kwargs)
     if r.status_code == 409:
-        raise RuntimeError(
+        raise RedmineWorkflowError(
             "Wiki page version conflict: the page has been modified since you last read it. "
-            "Re-read the page and retry with the current version."
+            "Re-read the page and retry with the current version.", status_code=409
         )
-    try:
-        r.raise_for_status()
-    except Exception:
-        log(f"Redmine error: {r.status_code} {r.text[:300]}")
-        raise
+    if r.status_code >= 400:
+        _raise_for_redmine_response(r)
     return r.json() if r.content else {}
 def _rm_upload_file(file_path, api_key):
     """Upload a file to Redmine and return the upload token.
@@ -111,20 +178,24 @@ def _rm_upload_file(file_path, api_key):
     file_size = path.stat().st_size
     if file_size == 0:
         raise ValueError("Cannot upload empty file")
+    if file_size > MAX_ATTACHMENT_BYTES:
+        raise ValueError(
+            f"Attachment exceeds MAX_ATTACHMENT_BYTES ({MAX_ATTACHMENT_BYTES} bytes)"
+        )
 
     content_type, _ = mimetypes.guess_type(file_path)
     if content_type is None:
         content_type = "application/octet-stream"
 
     url = f"{REDMINE_URL}/uploads.json"
-    with open(file_path, "rb") as f:
+    with path.open("rb") as f:
         r = requests.post(
             url,
             headers={
                 "X-Redmine-API-Key": api_key,
                 "Content-Type": "application/octet-stream",
             },
-            data=f.read(),
+            data=f,
             timeout=REQUEST_TIMEOUT,
         )
     r.raise_for_status()
@@ -167,9 +238,21 @@ def _assert_tracker_honored(issue, requested_tracker_id):
     if actual_tracker_id is None or int(actual_tracker_id) == int(requested_tracker_id):
         return
     issue_id = issue.get("id", "unknown")
-    raise RuntimeError(
+    raise RedmineWorkflowError(
         f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {requested_tracker_id}, "
-        f"Redmine returned tracker_id {actual_tracker_id}"
+        f"Redmine returned tracker_id {actual_tracker_id}",
+        redmine_payload={"issue": issue, "expected": requested_tracker_id},
+    )
+
+
+def _verify_field_matches(issue, field, expected, issue_id):
+    """Raise when a post-mutation issue field differs from the requested value."""
+    actual = issue.get(f"{field}_id")
+    if actual == expected:
+        return
+    raise RedmineWorkflowError(
+        f"Redmine issue {issue_id} {field} mismatch after mutation: requested {field}_id {expected}, Redmine returned {field}_id {actual}",
+        redmine_payload={"issue": issue, "expected": expected, "field": field},
     )
 
 # ── Document creation helpers (HTML form, not JSON API) ──
@@ -395,19 +478,21 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "assigned_to_id": {"type": "number"}, "priority_id": {"type": "number"},
                      "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"},
                      "category_id": {"type": "number"}, "due_date": {"type": "string"},
-                     "start_date": {"type": "string"}, "estimated_hours": {"type": "number"}}}},
+                     "start_date": {"type": "string"}, "estimated_hours": {"type": "number"},
+                     "verify": {"type": "boolean"}}}},
                 {"name": "update_issue_status", "description": "[DEPRECATED] Use update_issue instead. Update a Redmine issue status and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "status_id": {"type": "number"},
-                     "note": {"type": "string"}}}},
+                     "note": {"type": "string"}, "verify": {"type": "boolean"}}}},
                 {"name": "move_issue", "description": "[DEPRECATED] Use update_issue(project_id=..., tracker_id=...) instead. Move a Redmine issue to another visible project and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "project_id": {"type": "number"},
-                     "note": {"type": "string"}}}},
+                     "note": {"type": "string"}, "verify": {"type": "boolean"}}}},
                 {"name": "update_issue_tracker", "description": "[DEPRECATED] Use update_issue instead. Update a Redmine issue tracker and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "tracker_id": {"type": "number"},
-                     "note": {"type": "string"}, "allow_idea_tracker": {"type": "boolean"}}}},
+                     "note": {"type": "string"}, "allow_idea_tracker": {"type": "boolean"},
+                     "verify": {"type": "boolean"}}}},
                 {"name": "update_issue", "description": "Update any field on a Redmine issue (subject, description, status, tracker, assignee, project, dates, watchers, custom fields, etc.) with a single PUT /issues/{id}.json. Single-call replacement for update_issue_status, update_issue_tracker, and move_issue.",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"},
@@ -430,7 +515,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "required": ["issue_id"]}},
                 {"name": "add_issue_note", "description": "Append a journal note to a Redmine issue",
                  "inputSchema": {"type": "object", "properties": {
-                     "issue_id": {"type": "number"}, "note": {"type": "string"}}}},
+                     "issue_id": {"type": "number"}, "note": {"type": "string"},
+                     "verify": {"type": "boolean"}}}},
                 {"name": "list_issue_categories", "description": "List the issue categories defined on a Redmine project (returns id, name, project_id, and assigned_to_id when set)",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}},
@@ -520,15 +606,15 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("allow_idea_tracker", False),
                     args.get("category_id"), args.get("due_date"),
                     args.get("start_date"), args.get("estimated_hours"),
-                    api_key)
+                    api_key, args.get("verify", False))
             elif name == "update_issue_status":
-                return self._update_issue_status(args.get("issue_id"), args.get("status_id"), args.get("note", ""), api_key)
+                return self._update_issue_status(args.get("issue_id"), args.get("status_id"), args.get("note", ""), args.get("verify", False), api_key)
             elif name == "move_issue":
-                return self._move_issue(args.get("issue_id"), args.get("project_id"), args.get("note", ""), api_key)
+                return self._move_issue(args.get("issue_id"), args.get("project_id"), args.get("note", ""), args.get("verify", False), api_key)
             elif name == "update_issue_tracker":
                 return self._update_issue_tracker(
                     args.get("issue_id"), args.get("tracker_id", AGENT_TASK_TRACKER_ID),
-                    args.get("note", ""), args.get("allow_idea_tracker", False), api_key)
+                    args.get("note", ""), args.get("allow_idea_tracker", False), args.get("verify", False), api_key)
             elif name == "update_issue":
                 return self._update_issue(
                     args.get("issue_id"),
@@ -543,7 +629,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("notes", ""), args.get("allow_idea_tracker", False),
                     api_key)
             elif name == "add_issue_note":
-                return self._add_issue_note(args.get("issue_id"), args.get("note"), api_key)
+                return self._add_issue_note(args.get("issue_id"), args.get("note"), args.get("verify", False), api_key)
             elif name == "list_issue_categories":
                 return self._list_issue_categories(args.get("project_id"), api_key)
             elif name == "create_document":
@@ -636,7 +722,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         result["attachments"] = issue.get("attachments", [])
         return result
 
-    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, category_id, due_date, start_date, estimated_hours, api_key):
+    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, category_id, due_date, start_date, estimated_hours, api_key, verify=False):
         _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"project_id": project_id, "subject": subject, "description": description,
                  "tracker_id": tracker_id, "priority_id": priority_id, "status_id": status_id}
@@ -653,9 +739,14 @@ class MCPHandler(BaseHTTPRequestHandler):
         data = _rm_request("POST", "/issues.json", api_key, json={"issue": issue})
         created_issue = data.get("issue", {})
         _assert_tracker_honored(created_issue, tracker_id)
-        return _clean_issue(created_issue)
+        cleaned = _clean_issue(created_issue)
+        if verify:
+            verified = self._get_issue(int(cleaned["id"]), "journals", api_key)
+            _verify_field_matches(verified, "tracker", tracker_id, cleaned["id"])
+            return {"ok": True, "issue": verified}
+        return cleaned
 
-    def _update_issue_status(self, issue_id, status_id, note, api_key):
+    def _update_issue_status(self, issue_id, status_id, note, verify, api_key):
         _warn_deprecated_mutation("update_issue_status", "update_issue")
         issue = {"status_id": status_id}
         if note: issue["notes"] = note
@@ -664,38 +755,43 @@ class MCPHandler(BaseHTTPRequestHandler):
         updated = _rm_request("GET", f"/issues/{issue_id}.json", api_key)
         issue_body = updated.get("issue", {}) if isinstance(updated.get("issue"), dict) else {}
         actual_status_id = (issue_body.get("status") or {}).get("id")
-        if actual_status_id is not None and int(actual_status_id) != int(status_id):
-            raise RuntimeError(
-                f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
-                f"Redmine returned status_id {actual_status_id}"
-            )
-        return self._get_issue(issue_id, "journals", api_key)
+        result = self._get_issue(issue_id, "journals", api_key)
+        if verify:
+            _verify_field_matches(result, "status", status_id, issue_id)
+            return {"ok": True, "issue": result}
+        return result
 
-    def _move_issue(self, issue_id, project_id, note, api_key):
+    def _move_issue(self, issue_id, project_id, note, verify, api_key):
         _warn_deprecated_mutation("move_issue", "update_issue")
         _rm_request("GET", f"/projects/{project_id}.json", api_key)
         issue = {"project_id": project_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
         updated = self._get_issue(issue_id, "journals", api_key)
+        if verify:
+            _verify_field_matches(updated, "project", project_id, issue_id)
+            return {"ok": True, "issue": updated}
         if updated.get("project_id") not in (None, project_id):
-            raise RuntimeError(
-                f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, "
-                f"Redmine returned project_id {updated.get('project_id')}"
+            raise RedmineWorkflowError(
+                f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, Redmine returned project_id {updated.get('project_id')}",
+                redmine_payload={"issue": updated, "expected": project_id},
             )
         return updated
 
-    def _update_issue_tracker(self, issue_id, tracker_id, note, allow_idea_tracker, api_key):
+    def _update_issue_tracker(self, issue_id, tracker_id, note, allow_idea_tracker, verify, api_key):
         _warn_deprecated_mutation("update_issue_tracker", "update_issue")
         _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"tracker_id": tracker_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
         updated = self._get_issue(issue_id, "journals", api_key)
+        if verify:
+            _verify_field_matches(updated, "tracker", tracker_id, issue_id)
+            return {"ok": True, "issue": updated}
         if updated.get("tracker_id") not in (None, tracker_id):
-            raise RuntimeError(
-                f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
-                f"Redmine returned tracker_id {updated.get('tracker_id')}"
+            raise RedmineWorkflowError(
+                f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, Redmine returned tracker_id {updated.get('tracker_id')}",
+                redmine_payload={"issue": updated, "expected": tracker_id},
             )
         return updated
 
@@ -753,9 +849,19 @@ class MCPHandler(BaseHTTPRequestHandler):
 
         return updated
 
-    def _add_issue_note(self, issue_id, note, api_key):
+    def _add_issue_note(self, issue_id, note, verify, api_key):
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": {"notes": note}})
-        return self._get_issue(issue_id, "journals", api_key)
+        result = self._get_issue(issue_id, "journals", api_key)
+        if verify:
+            journals = result.get("journals") or []
+            latest = journals[-1] if journals else {}
+            if latest.get("notes") != note:
+                raise RedmineWorkflowError(
+                    f"Redmine issue {issue_id} journal note mismatch after mutation",
+                    redmine_payload={"expected": note, "latest": latest.get("notes")},
+                )
+            return {"ok": True, "issue": result}
+        return result
 
     def _list_issue_categories(self, project_id, api_key):
         data = _rm_request("GET", f"/projects/{project_id}.json?include=issue_categories", api_key)

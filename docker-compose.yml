@@ -16,6 +16,7 @@ services:
       MCP_PORT: ${MCP_PORT:-8080}
       MCP_PATH: ${MCP_PATH:-/sse}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_ATTACHMENT_BYTES: ${MAX_ATTACHMENT_BYTES:-52428800}
     networks:
       - memory
       - redmine-mcp
