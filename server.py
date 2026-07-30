@@ -418,11 +418,26 @@ def create_issue(
 
 @mcp.tool()
 def update_issue_status(issue_id: int, status_id: int, note: str = "") -> dict[str, Any]:
-    """Update a Redmine issue status and optionally add a note."""
+    """Update a Redmine issue status and optionally add a note.
+
+    Redmine PUT /issues/{id}.json returns 204 No Content — the helper used to
+    return the PUT response directly (which was `{}` because there is no body).
+    We now re-fetch the issue via GET after the PUT and verify the persisted
+    status_id matches the requested one. If Redmine reports a different status
+    we raise STATUS_MISMATCH instead of silently returning a stale body.
+    """
     issue: dict[str, Any] = {"status_id": status_id}
     if note:
         issue["notes"] = note
     _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
+    updated = _request("GET", f"/issues/{issue_id}.json")
+    issue_body = updated.get("issue", {}) if isinstance(updated.get("issue"), dict) else {}
+    actual_status_id = (issue_body.get("status") or {}).get("id")
+    if actual_status_id is not None and int(actual_status_id) != int(status_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
+            f"Redmine returned status_id {actual_status_id}"
+        )
     return get_issue(issue_id, include="journals")
 
 
