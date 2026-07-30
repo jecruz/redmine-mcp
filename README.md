@@ -21,6 +21,9 @@ Configuration also supports `REQUEST_TIMEOUT` (default `30`) and
 `REDMINE_API_KEY_REF` through CAISS Keyring and injects the key only into the
 running container.
 
+The container pins the MCP Python SDK to `1.26.0`; the Docker build includes an
+import smoke check so an incompatible upstream SDK cannot reach the runtime.
+
 The MCP surface includes issue/project discovery and mutation, unified
 `update_issue`, compatibility wrappers (`update_issue_status`, `move_issue`,
 and `update_issue_tracker`), notes, memberships, priorities, trackers,
