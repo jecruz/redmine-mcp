@@ -628,6 +628,133 @@ def update_issue_tracker(
 
 
 @mcp.tool()
+def update_issue(
+    issue_id: int,
+    subject: str | None = None,
+    description: str | None = None,
+    assigned_to_id: int | None = None,
+    category_id: int | None = None,
+    priority_id: int | None = None,
+    status_id: int | None = None,
+    tracker_id: int | None = None,
+    due_date: str | None = None,
+    start_date: str | None = None,
+    estimated_hours: float | None = None,
+    done_ratio: int | None = None,
+    custom_fields: list[dict[str, Any]] | None = None,
+    watcher_user_ids: list[int] | None = None,
+    project_id: int | None = None,
+    notes: str = "",
+    allow_idea_tracker: bool = False,
+) -> dict[str, Any]:
+    """Update any field on a Redmine issue with PUT /issues/{id}.json.
+
+    Single-call replacement for the older specialised tools (update_issue_status,
+    update_issue_tracker, move_issue). Pass only the fields you want to change —
+    everything is optional, and only the supplied fields are sent to Redmine.
+
+    Common combinations:
+      update_issue(61, status_id=5, notes="Closing — no repro")
+        → closes issue 61 with a journal note.
+      update_issue(N, project_id=98, tracker_id=3, notes="Move + retype")
+        → moves to project 98 in a single PUT and verifies the tracker was not
+          coerced to the destination project's default.
+
+    The PUT response is 204 No Content; we re-fetch the issue via GET and verify
+    the persisted state matches every field we asked Redmine to change. On any
+    mismatch (e.g. tracker coerced, status not transitioned, project not moved)
+    a RuntimeError is raised so callers never confuse a silent no-op for
+    success.
+
+    Args:
+        issue_id: Redmine issue id (required).
+        subject: New issue subject.
+        description: New description text.
+        assigned_to_id: Assignee user id (or None to leave unchanged).
+        category_id: Issue category id in the current/new project.
+        priority_id: Priority id.
+        status_id: Status id (must be a valid transition from the current status).
+        tracker_id: Tracker id. Use allow_idea_tracker=True to use the Idea tracker.
+        due_date: ISO date string (YYYY-MM-DD).
+        start_date: ISO date string (YYYY-MM-DD).
+        estimated_hours: Estimated hours (float).
+        done_ratio: Percent complete (0-100).
+        custom_fields: List of {"id": int, "value": Any} dicts to update.
+        watcher_user_ids: List of user ids to set as watchers (replaces existing).
+        project_id: Destination project id. Moves the issue; may also require
+            tracker_id to be set if the new project does not honour the current
+            tracker.
+        notes: Optional journal note recorded alongside the field changes.
+        allow_idea_tracker: Set True only when the user explicitly asked for the
+            Idea tracker; agents default to False.
+
+    Returns the cleaned post-change issue (with journals, relations, attachments).
+    """
+    issue: dict[str, Any] = {}
+    if subject is not None:
+        issue["subject"] = subject
+    if description is not None:
+        issue["description"] = description
+    if assigned_to_id is not None:
+        issue["assigned_to_id"] = assigned_to_id
+    if category_id is not None:
+        issue["category_id"] = category_id
+    if priority_id is not None:
+        issue["priority_id"] = priority_id
+    if status_id is not None:
+        issue["status_id"] = status_id
+    if tracker_id is not None:
+        _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
+        issue["tracker_id"] = tracker_id
+    if due_date is not None:
+        issue["due_date"] = due_date
+    if start_date is not None:
+        issue["start_date"] = start_date
+    if estimated_hours is not None:
+        issue["estimated_hours"] = estimated_hours
+    if done_ratio is not None:
+        issue["done_ratio"] = done_ratio
+    if custom_fields:
+        issue["custom_fields"] = list(custom_fields)
+    if watcher_user_ids is not None:
+        issue["watcher_user_ids"] = list(watcher_user_ids)
+    if project_id is not None:
+        issue["project_id"] = project_id
+    if notes:
+        issue["notes"] = notes
+
+    if not issue:
+        raise ValueError(
+            "update_issue requires at least one field to change or a non-empty notes string"
+        )
+
+    _request("PUT", f"/issues/{issue_id}.json", json={"issue": issue})
+
+    # Re-fetch and verify the persisted state matches every requested field.
+    # Redmine PUT is 204 No Content — without the verify we would silently
+    # return success on coercion/no-op failures (Redmine #1559).
+    updated = get_issue(issue_id, include="journals")
+
+    if status_id is not None and updated.get("status_id") not in (None, status_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
+            f"Redmine returned status_id {updated.get('status_id')}"
+        )
+    if project_id is not None and updated.get("project_id") not in (None, project_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, "
+            f"Redmine returned project_id {updated.get('project_id')}"
+        )
+    if tracker_id is not None and updated.get("tracker_id") not in (None, tracker_id):
+        raise RuntimeError(
+            f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
+            f"Redmine returned tracker_id {updated.get('tracker_id')}"
+        )
+
+    return updated
+
+
+@mcp.tool()
 def add_issue_note(issue_id: int, note: str) -> dict[str, Any]:
     """Append a journal note to a Redmine issue."""
     _request("PUT", f"/issues/{issue_id}.json", json={"issue": {"notes": note}})
