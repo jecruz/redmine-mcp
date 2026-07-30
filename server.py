@@ -757,7 +757,40 @@ def update_wiki_page(
         json={"wiki_page": wiki_page},
     )
     return data.get("wiki_page", {})
+def list_memberships(project_id: int, user_id: int | None = None) -> dict[str, Any]:
+    """List project memberships with roles for permission diagnostics.
 
+    Returns all members of the project with their role names. When user_id is
+    provided, returns only that user's membership (or empty list if not a member).
+    """
+    data = _request("GET", f"/projects/{project_id}/memberships.json")
+    memberships = data.get("memberships", [])
+
+    result: list[dict[str, Any]] = []
+    for membership in memberships:
+        entry = {
+            "id": membership.get("id"),
+            "user": {
+                "id": (membership.get("user") or {}).get("id"),
+                "name": (membership.get("user") or {}).get("name"),
+            },
+            "roles": [
+                {"id": role.get("id"), "name": role.get("name")}
+                for role in (membership.get("roles") or [])
+            ],
+        }
+        if user_id is not None:
+            if entry["user"]["id"] == user_id:
+                result.append(entry)
+                break
+        else:
+            result.append(entry)
+
+    return {
+        "project_id": project_id,
+        "total_count": len(result),
+        "memberships": result,
+    }
 
 @mcp.tool()
 def delete_issue(
