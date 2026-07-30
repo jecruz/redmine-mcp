@@ -2,7 +2,7 @@
 """Redmine MCP Server — SSE + direct POST dual-mode (threaded)"""
 import json, os, sys, threading, queue, re
 from datetime import datetime, timezone
-import json, os, sys, threading, queue, re, mimetypes
+import json, os, sys, threading, queue, re, mimetypes, warnings
 from pathlib import Path
 from html import unescape
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -64,6 +64,14 @@ def _broadcast(msg):
 
 def _rm_headers(api_key):
     return {"X-Redmine-API-Key": api_key, "Content-Type": "application/json"}
+
+def _warn_deprecated_mutation(name, replacement):
+    warnings.warn(
+        f"{name} is deprecated; use {replacement} instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
 
 def _rm_request(method, path, api_key, **kwargs):
     url = f"{REDMINE_URL}{path}"
@@ -388,15 +396,15 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"},
                      "category_id": {"type": "number"}, "due_date": {"type": "string"},
                      "start_date": {"type": "string"}, "estimated_hours": {"type": "number"}}}},
-                {"name": "update_issue_status", "description": "Update a Redmine issue status and optionally add a note",
+                {"name": "update_issue_status", "description": "[DEPRECATED] Use update_issue instead. Update a Redmine issue status and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "status_id": {"type": "number"},
                      "note": {"type": "string"}}}},
-                {"name": "move_issue", "description": "Move a Redmine issue to another visible project and optionally add a note",
+                {"name": "move_issue", "description": "[DEPRECATED] Use update_issue(project_id=..., tracker_id=...) instead. Move a Redmine issue to another visible project and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "project_id": {"type": "number"},
                      "note": {"type": "string"}}}},
-                {"name": "update_issue_tracker", "description": "Update a Redmine issue tracker and optionally add a note",
+                {"name": "update_issue_tracker", "description": "[DEPRECATED] Use update_issue instead. Update a Redmine issue tracker and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "tracker_id": {"type": "number"},
                      "note": {"type": "string"}, "allow_idea_tracker": {"type": "boolean"}}}},
@@ -615,6 +623,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         return _clean_issue(created_issue)
 
     def _update_issue_status(self, issue_id, status_id, note, api_key):
+        _warn_deprecated_mutation("update_issue_status", "update_issue")
         issue = {"status_id": status_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
@@ -630,6 +639,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         return self._get_issue(issue_id, "journals", api_key)
 
     def _move_issue(self, issue_id, project_id, note, api_key):
+        _warn_deprecated_mutation("move_issue", "update_issue")
         _rm_request("GET", f"/projects/{project_id}.json", api_key)
         issue = {"project_id": project_id}
         if note: issue["notes"] = note
@@ -643,6 +653,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         return updated
 
     def _update_issue_tracker(self, issue_id, tracker_id, note, allow_idea_tracker, api_key):
+        _warn_deprecated_mutation("update_issue_tracker", "update_issue")
         _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"tracker_id": tracker_id}
         if note: issue["notes"] = note

@@ -3,6 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 import mimetypes
+import warnings
 from html import unescape
 from pathlib import Path
 from typing import Any
@@ -559,16 +560,17 @@ def create_issue(
     return _clean_issue(created_issue)
 
 
+def _warn_deprecated_mutation(name: str, replacement: str) -> None:
+    warnings.warn(
+        f"{name} is deprecated; use {replacement} instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
 @mcp.tool()
 def update_issue_status(issue_id: int, status_id: int, note: str = "") -> dict[str, Any]:
-    """Update a Redmine issue status and optionally add a note.
-
-    Redmine PUT /issues/{id}.json returns 204 No Content — the helper used to
-    return the PUT response directly (which was `{}` because there is no body).
-    We now re-fetch the issue via GET after the PUT and verify the persisted
-    status_id matches the requested one. If Redmine reports a different status
-    we raise STATUS_MISMATCH instead of silently returning a stale body.
-    """
+    """Deprecated: use update_issue(issue_id=..., status_id=..., notes=...)."""
+    _warn_deprecated_mutation("update_issue_status", "update_issue")
     issue: dict[str, Any] = {"status_id": status_id}
     if note:
         issue["notes"] = note
@@ -586,7 +588,8 @@ def update_issue_status(issue_id: int, status_id: int, note: str = "") -> dict[s
 
 @mcp.tool()
 def move_issue(issue_id: int, project_id: int, note: str = "") -> dict[str, Any]:
-    """Move an issue to another Redmine project and optionally add a note."""
+    """Deprecated: use update_issue(project_id=..., tracker_id=..., notes=...)."""
+    _warn_deprecated_mutation("move_issue", "update_issue")
     _request("GET", f"/projects/{project_id}.json")
     issue: dict[str, Any] = {"project_id": project_id}
     if note:
@@ -608,7 +611,8 @@ def update_issue_tracker(
     note: str = "",
     allow_idea_tracker: bool = False,
 ) -> dict[str, Any]:
-    """Change an issue tracker and optionally add a note."""
+    """Deprecated: use update_issue(issue_id=..., tracker_id=..., notes=...)."""
+    _warn_deprecated_mutation("update_issue_tracker", "update_issue")
     _validate_agent_tracker(tracker_id, allow_idea_tracker=allow_idea_tracker)
     issue: dict[str, Any] = {"tracker_id": tracker_id}
     if note:
