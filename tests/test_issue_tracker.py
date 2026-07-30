@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -139,3 +140,62 @@ def test_synology_update_issue_tracker_sets_task(monkeypatch) -> None:
         "json": {"issue": {"tracker_id": 3, "notes": "Correct tracker"}},
     }
     assert result["tracker_id"] == 3
+
+
+def test_create_issue_forwards_optional_fields(monkeypatch) -> None:
+    """create_issue forwards assigned_to_id, category_id, due_date, start_date, estimated_hours to Redmine."""
+    module = _load_synology_server()
+    handler = object.__new__(module.MCPHandler)
+
+    captured_body: dict[str, dict[str, Any]] = {}
+
+    def fake_request(method, path, api_key, **kwargs):
+        captured_body["issue"] = kwargs["json"]["issue"]
+        return {"issue": {"id": 1600, "tracker": {"id": 3}, "project": {"id": 20}, "status": {"id": 1}}}
+
+    monkeypatch.setattr(module, "_rm_request", fake_request)
+
+    handler._call_tool(
+        "create_issue",
+        {
+            "project_id": 20,
+            "subject": "Forward optional fields",
+            "assigned_to_id": 1,
+            "category_id": 5,
+            "due_date": "2026-08-15",
+            "start_date": "2026-07-29",
+            "estimated_hours": 3.5,
+        },
+    )
+
+    assert captured_body["issue"]["assigned_to_id"] == 1
+    assert captured_body["issue"]["category_id"] == 5
+    assert captured_body["issue"]["due_date"] == "2026-08-15"
+    assert captured_body["issue"]["start_date"] == "2026-07-29"
+    assert captured_body["issue"]["estimated_hours"] == 3.5
+
+
+def test_create_issue_omits_fields_when_none(monkeypatch) -> None:
+    """create_issue does not include optional fields when they are None or omitted."""
+    module = _load_synology_server()
+    handler = object.__new__(module.MCPHandler)
+
+    captured_body: dict[str, dict[str, Any]] = {}
+
+    def fake_request(method, path, api_key, **kwargs):
+        captured_body["issue"] = kwargs["json"]["issue"]
+        return {"issue": {"id": 1601, "tracker": {"id": 3}, "project": {"id": 20}, "status": {"id": 1}}}
+
+    monkeypatch.setattr(module, "_rm_request", fake_request)
+
+    handler._call_tool(
+        "create_issue",
+        {
+            "project_id": 20,
+            "subject": "No optional fields",
+        },
+    )
+
+    body = captured_body["issue"]
+    for key in ("assigned_to_id", "category_id", "due_date", "start_date", "estimated_hours"):
+        assert key not in body, f"{key} should not be present when omitted"

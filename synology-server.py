@@ -64,6 +64,23 @@ def _rm_request(method, path, api_key, **kwargs):
         raise
     return r.json() if r.content else {}
 
+
+def _rm_wiki_request(method, path, api_key, **kwargs):
+    """Like _rm_request but surfaces HTTP 409 for version-conflict detection."""
+    url = f"{REDMINE_URL}{path}"
+    r = requests.request(method, url, headers=_rm_headers(api_key), timeout=REQUEST_TIMEOUT, **kwargs)
+    if r.status_code == 409:
+        raise RuntimeError(
+            "Wiki page version conflict: the page has been modified since you last read it. "
+            "Re-read the page and retry with the current version."
+        )
+    try:
+        r.raise_for_status()
+    except Exception:
+        log(f"Redmine error: {r.status_code} {r.text[:300]}")
+        raise
+    return r.json() if r.content else {}
+
 def _clean_issue(issue):
     return {
         "id": issue.get("id"),
@@ -304,6 +321,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                 {"name": "list_projects", "description": "List visible Redmine projects",
                  "inputSchema": {"type": "object", "properties": {
                      "limit": {"type": "number"}, "offset": {"type": "number"}}}},
+                {"name": "list_issue_statuses", "description": "List issue statuses available to the authenticated user for a project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "is_closed": {"type": "boolean"}}}},
                 {"name": "list_issues", "description": "List Redmine issues with optional filters",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "assigned_to_id": {"type": "string"},
@@ -318,7 +338,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "project_id": {"type": "number"}, "subject": {"type": "string"},
                      "description": {"type": "string"}, "tracker_id": {"type": "number"},
                      "assigned_to_id": {"type": "number"}, "priority_id": {"type": "number"},
-                     "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"}}}},
+                     "status_id": {"type": "number"}, "allow_idea_tracker": {"type": "boolean"},
+                     "category_id": {"type": "number"}, "due_date": {"type": "string"},
+                     "start_date": {"type": "string"}, "estimated_hours": {"type": "number"}}}},
                 {"name": "update_issue_status", "description": "Update a Redmine issue status and optionally add a note",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "status_id": {"type": "number"},
@@ -334,10 +356,19 @@ class MCPHandler(BaseHTTPRequestHandler):
                 {"name": "add_issue_note", "description": "Append a journal note to a Redmine issue",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "note": {"type": "string"}}}},
+                {"name": "list_issue_categories", "description": "List the issue categories defined on a Redmine project (returns id, name, project_id, and assigned_to_id when set)",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}},
+                     "required": ["project_id"]}},
                 {"name": "create_document", "description": "Create a Redmine project document through the HTML form (requires web session auth — REDMINE_WEB_USERNAME/REDMINE_WEB_PASSWORD or REDMINE_WEB_SESSION_COOKIE env vars)",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}, "title": {"type": "string"},
                      "description": {"type": "string"}, "category_id": {"type": "number"}}}},
+                {"name": "list_trackers", "description": "List Redmine trackers, optionally filtered by project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}}}},
+                {"name": "list_priorities", "description": "List issue priorities configured on the Redmine instance",
+                 "inputSchema": {"type": "object", "properties": {}}},
                 {"name": "create_project", "description": "Create a new Redmine project",
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
@@ -348,7 +379,24 @@ class MCPHandler(BaseHTTPRequestHandler):
                      "query": {"type": "string"}, "limit": {"type": "number"}, "offset": {"type": "number"}}}},
                 {"name": "resolve_project", "description": "Resolve a Redmine project by numeric id, identifier, or name. Returns canonical {id, name, identifier}.",
                  "inputSchema": {"type": "object", "properties": {
-                     "identifier_or_name": {"type": "string"}}}}]}
+                     "identifier_or_name": {"type": "string"}}}},
+                {"name": "list_wiki_pages", "description": "List all wiki pages in a Redmine project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}}}},
+                {"name": "get_wiki_page", "description": "Get a Redmine wiki page by title",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "version": {"type": "number"}}}},
+                {"name": "create_wiki_page", "description": "Create a new wiki page in a Redmine project",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "text": {"type": "string"}, "parent_title": {"type": "string"},
+                     "comments": {"type": "string"}}}},
+                {"name": "update_wiki_page", "description": "Update an existing wiki page with optimistic concurrency control",
+                 "inputSchema": {"type": "object", "properties": {
+                     "project_id": {"type": "number"}, "title": {"type": "string"},
+                     "text": {"type": "string"}, "version": {"type": "number"},
+                     "comments": {"type": "string"}}}}]}
         elif method == "tools/call":
             tool = params.get("name", "")
             args = params.get("arguments", {})
@@ -364,6 +412,9 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._get_current_user(api_key)
             elif name == "list_projects":
                 return self._list_projects(args.get("limit", 100), args.get("offset", 0), api_key)
+            elif name == "list_issue_statuses":
+                return self._list_issue_statuses(
+                    args.get("project_id"), args.get("is_closed"), api_key)
             elif name == "list_issues":
                 return self._list_issues(
                     args.get("project_id"), args.get("assigned_to_id"),
@@ -376,7 +427,10 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("project_id"), args.get("subject"), args.get("description", ""),
                     args.get("tracker_id", 3), args.get("assigned_to_id"),
                     args.get("priority_id", 2), args.get("status_id", 1),
-                    args.get("allow_idea_tracker", False), api_key)
+                    args.get("allow_idea_tracker", False),
+                    args.get("category_id"), args.get("due_date"),
+                    args.get("start_date"), args.get("estimated_hours"),
+                    api_key)
             elif name == "update_issue_status":
                 return self._update_issue_status(args.get("issue_id"), args.get("status_id"), args.get("note", ""), api_key)
             elif name == "move_issue":
@@ -387,10 +441,16 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("note", ""), args.get("allow_idea_tracker", False), api_key)
             elif name == "add_issue_note":
                 return self._add_issue_note(args.get("issue_id"), args.get("note"), api_key)
+            elif name == "list_issue_categories":
+                return self._list_issue_categories(args.get("project_id"), api_key)
             elif name == "create_document":
                 return self._create_document(
                     args.get("project_id"), args.get("title"), args.get("description", ""),
                     args.get("category_id"), api_key)
+            elif name == "list_trackers":
+                return self._list_trackers(args.get("project_id"), api_key)
+            elif name == "list_priorities":
+                return self._list_priorities(api_key)
             elif name == "create_project":
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
@@ -399,6 +459,18 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._search_projects(args.get("query", ""), args.get("limit", 100), args.get("offset", 0), api_key)
             elif name == "resolve_project":
                 return self._resolve_project(args.get("identifier_or_name", ""), api_key)
+            elif name == "list_wiki_pages":
+                return self._list_wiki_pages(args.get("project_id"), api_key)
+            elif name == "get_wiki_page":
+                return self._get_wiki_page(args.get("project_id"), args.get("title"), args.get("version"), api_key)
+            elif name == "create_wiki_page":
+                return self._create_wiki_page(
+                    args.get("project_id"), args.get("title"), args.get("text"),
+                    args.get("parent_title"), args.get("comments", ""), api_key)
+            elif name == "update_wiki_page":
+                return self._update_wiki_page(
+                    args.get("project_id"), args.get("title"), args.get("text"),
+                    args.get("version"), args.get("comments", ""), api_key)
             return {"error": f"Unknown tool: {name}"}
         except Exception as e:
             return {"error": str(e)}
@@ -416,6 +488,16 @@ class MCPHandler(BaseHTTPRequestHandler):
                 "projects": [{"id": p.get("id"), "identifier": p.get("identifier"),
                               "name": p.get("name"), "parent": (p.get("parent") or {}).get("name"),
                               "description": p.get("description")} for p in projects]}
+
+    def _list_issue_statuses(self, project_id, is_closed, api_key):
+        params = {"project_id": project_id} if project_id is not None else {}
+        data = _rm_request("GET", "/issue_statuses.json", api_key, params=params)
+        statuses = [{"id": status.get("id"), "name": status.get("name"),
+                     "is_closed": status.get("is_closed", False)}
+                    for status in data.get("issue_statuses", [])]
+        if is_closed is not None:
+            statuses = [status for status in statuses if status["is_closed"] is is_closed]
+        return statuses
 
     def _list_issues(self, project_id, assigned_to_id, status_id, tracker_id, limit, offset, api_key):
         params = {"limit": limit, "offset": offset}
@@ -439,12 +521,20 @@ class MCPHandler(BaseHTTPRequestHandler):
         result["attachments"] = issue.get("attachments", [])
         return result
 
-    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, api_key):
+    def _create_issue(self, project_id, subject, description, tracker_id, assigned_to_id, priority_id, status_id, allow_idea_tracker, category_id, due_date, start_date, estimated_hours, api_key):
         _validate_agent_tracker(tracker_id, allow_idea_tracker)
         issue = {"project_id": project_id, "subject": subject, "description": description,
                  "tracker_id": tracker_id, "priority_id": priority_id, "status_id": status_id}
         if assigned_to_id is not None:
             issue["assigned_to_id"] = assigned_to_id
+        if category_id is not None:
+            issue["category_id"] = category_id
+        if due_date is not None:
+            issue["due_date"] = due_date
+        if start_date is not None:
+            issue["start_date"] = start_date
+        if estimated_hours is not None:
+            issue["estimated_hours"] = estimated_hours
         data = _rm_request("POST", "/issues.json", api_key, json={"issue": issue})
         created_issue = data.get("issue", {})
         _assert_tracker_honored(created_issue, tracker_id)
@@ -454,6 +544,15 @@ class MCPHandler(BaseHTTPRequestHandler):
         issue = {"status_id": status_id}
         if note: issue["notes"] = note
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+        # PUT returns 204 No Content; re-fetch and verify status_id matches.
+        updated = _rm_request("GET", f"/issues/{issue_id}.json", api_key)
+        issue_body = updated.get("issue", {}) if isinstance(updated.get("issue"), dict) else {}
+        actual_status_id = (issue_body.get("status") or {}).get("id")
+        if actual_status_id is not None and int(actual_status_id) != int(status_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
+                f"Redmine returned status_id {actual_status_id}"
+            )
         return self._get_issue(issue_id, "journals", api_key)
 
     def _move_issue(self, issue_id, project_id, note, api_key):
@@ -486,9 +585,59 @@ class MCPHandler(BaseHTTPRequestHandler):
         _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": {"notes": note}})
         return self._get_issue(issue_id, "journals", api_key)
 
+    def _list_issue_categories(self, project_id, api_key):
+        data = _rm_request("GET", f"/projects/{project_id}.json?include=issue_categories", api_key)
+        categories = (data.get("project") or {}).get("issue_categories", [])
+        return [
+            {
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "project_id": (c.get("project") or {}).get("id"),
+                "assigned_to_id": (c.get("assigned_to") or {}).get("id"),
+            }
+            for c in categories
+        ]
+
     def _create_document(self, project_id, title, description, category_id, api_key):
         project_identifier = _resolve_project_identifier(project_id, api_key)
         return _create_document_web(project_identifier, title, description, category_id)
+
+    def _list_trackers(self, project_id, api_key):
+        data = _rm_request("GET", "/trackers.json", api_key)
+        all_trackers = data.get("trackers", [])
+
+        if project_id is None:
+            return {
+                "total_count": len(all_trackers),
+                "trackers": [
+                    {"id": t.get("id"), "name": t.get("name")}
+                    for t in all_trackers
+                ],
+            }
+
+        project_data = _rm_request("GET", f"/projects/{project_id}.json?include=trackers", api_key)
+        project_trackers = project_data.get("project", {}).get("trackers", [])
+        tracker_ids = {t.get("id") for t in project_trackers}
+
+        filtered = [t for t in all_trackers if t.get("id") in tracker_ids]
+        return {
+            "total_count": len(filtered),
+            "trackers": [
+                {"id": t.get("id"), "name": t.get("name")}
+                for t in filtered
+            ],
+        }
+
+    def _list_priorities(self, api_key):
+        data = _rm_request("GET", "/enumerations/issue_priorities.json", api_key)
+        return [
+            {
+                "id": priority.get("id"),
+                "name": priority.get("name"),
+                "is_default": priority.get("is_default", False),
+            }
+            for priority in data.get("issue_priorities", [])
+        ]
 
     def _create_project(self, name, identifier, description, parent_id, inherit_members, api_key):
         project = {
@@ -591,6 +740,38 @@ class MCPHandler(BaseHTTPRequestHandler):
         raise RuntimeError(
             f"Redmine project '{identifier_or_name}' not found by id, identifier, or name"
         )
+
+    def _list_wiki_pages(self, project_id, api_key):
+        data = _rm_request("GET", f"/projects/{project_id}/wiki/index.json", api_key)
+        return data.get("wiki_pages", [])
+
+    def _get_wiki_page(self, project_id, title, version, api_key):
+        path = f"/projects/{project_id}/wiki/{title}.json"
+        params = {}
+        if version is not None:
+            params["version"] = version
+        data = _rm_request("GET", path, api_key, params=params)
+        return data.get("wiki_page", {})
+
+    def _create_wiki_page(self, project_id, title, text, parent_title, comments, api_key):
+        wiki_page = {"text": text, "comments": comments}
+        if parent_title is not None:
+            wiki_page["parent_title"] = parent_title
+        data = _rm_wiki_request(
+            "PUT", f"/projects/{project_id}/wiki/{title}.json",
+            api_key, json={"wiki_page": wiki_page},
+        )
+        return data.get("wiki_page", {})
+
+    def _update_wiki_page(self, project_id, title, text, version, comments, api_key):
+        wiki_page = {"text": text, "comments": comments}
+        if version is not None:
+            wiki_page["version"] = version
+        data = _rm_wiki_request(
+            "PUT", f"/projects/{project_id}/wiki/{title}.json",
+            api_key, json={"wiki_page": wiki_page},
+        )
+        return data.get("wiki_page", {})
 
     def log_message(self, f, *args):
         pass
