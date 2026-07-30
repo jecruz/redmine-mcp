@@ -400,6 +400,26 @@ class MCPHandler(BaseHTTPRequestHandler):
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "tracker_id": {"type": "number"},
                      "note": {"type": "string"}, "allow_idea_tracker": {"type": "boolean"}}}},
+                {"name": "update_issue", "description": "Update any field on a Redmine issue (subject, description, status, tracker, assignee, project, dates, watchers, custom fields, etc.) with a single PUT /issues/{id}.json. Single-call replacement for update_issue_status, update_issue_tracker, and move_issue.",
+                 "inputSchema": {"type": "object", "properties": {
+                     "issue_id": {"type": "number"},
+                     "subject": {"type": "string"},
+                     "description": {"type": "string"},
+                     "assigned_to_id": {"type": "number"},
+                     "category_id": {"type": "number"},
+                     "priority_id": {"type": "number"},
+                     "status_id": {"type": "number"},
+                     "tracker_id": {"type": "number"},
+                     "due_date": {"type": "string"},
+                     "start_date": {"type": "string"},
+                     "estimated_hours": {"type": "number"},
+                     "done_ratio": {"type": "number"},
+                     "custom_fields": {"type": "array"},
+                     "watcher_user_ids": {"type": "array"},
+                     "project_id": {"type": "number"},
+                     "notes": {"type": "string"},
+                     "allow_idea_tracker": {"type": "boolean"}},
+                     "required": ["issue_id"]}},
                 {"name": "add_issue_note", "description": "Append a journal note to a Redmine issue",
                  "inputSchema": {"type": "object", "properties": {
                      "issue_id": {"type": "number"}, "note": {"type": "string"}}}},
@@ -501,6 +521,19 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return self._update_issue_tracker(
                     args.get("issue_id"), args.get("tracker_id", AGENT_TASK_TRACKER_ID),
                     args.get("note", ""), args.get("allow_idea_tracker", False), api_key)
+            elif name == "update_issue":
+                return self._update_issue(
+                    args.get("issue_id"),
+                    args.get("subject"), args.get("description"),
+                    args.get("assigned_to_id"), args.get("category_id"),
+                    args.get("priority_id"), args.get("status_id"),
+                    args.get("tracker_id"),
+                    args.get("due_date"), args.get("start_date"),
+                    args.get("estimated_hours"), args.get("done_ratio"),
+                    args.get("custom_fields"), args.get("watcher_user_ids"),
+                    args.get("project_id"),
+                    args.get("notes", ""), args.get("allow_idea_tracker", False),
+                    api_key)
             elif name == "add_issue_note":
                 return self._add_issue_note(args.get("issue_id"), args.get("note"), api_key)
             elif name == "list_issue_categories":
@@ -653,6 +686,60 @@ class MCPHandler(BaseHTTPRequestHandler):
                 f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
                 f"Redmine returned tracker_id {updated.get('tracker_id')}"
             )
+        return updated
+
+    def _update_issue(self, issue_id, subject, description, assigned_to_id, category_id, priority_id, status_id, tracker_id, due_date, start_date, estimated_hours, done_ratio, custom_fields, watcher_user_ids, project_id, notes, allow_idea_tracker, api_key):
+        """Update any field on a Redmine issue with PUT /issues/{id}.json.
+
+        Single-call replacement for _update_issue_status / _update_issue_tracker /
+        _move_issue. Only the supplied (non-None) fields are sent to Redmine. The
+        PUT response is 204 No Content; we re-fetch and verify the persisted state
+        matches every requested field, raising RuntimeError on any mismatch so
+        callers never confuse a silent no-op for success.
+        """
+        issue = {}
+        if subject is not None: issue["subject"] = subject
+        if description is not None: issue["description"] = description
+        if assigned_to_id is not None: issue["assigned_to_id"] = assigned_to_id
+        if category_id is not None: issue["category_id"] = category_id
+        if priority_id is not None: issue["priority_id"] = priority_id
+        if status_id is not None: issue["status_id"] = status_id
+        if tracker_id is not None:
+            _validate_agent_tracker(tracker_id, allow_idea_tracker)
+            issue["tracker_id"] = tracker_id
+        if due_date is not None: issue["due_date"] = due_date
+        if start_date is not None: issue["start_date"] = start_date
+        if estimated_hours is not None: issue["estimated_hours"] = estimated_hours
+        if done_ratio is not None: issue["done_ratio"] = done_ratio
+        if custom_fields: issue["custom_fields"] = list(custom_fields)
+        if watcher_user_ids is not None: issue["watcher_user_ids"] = list(watcher_user_ids)
+        if project_id is not None: issue["project_id"] = project_id
+        if notes: issue["notes"] = notes
+
+        if not issue:
+            raise ValueError(
+                "update_issue requires at least one field to change or a non-empty notes string"
+            )
+
+        _rm_request("PUT", f"/issues/{issue_id}.json", api_key, json={"issue": issue})
+        updated = self._get_issue(issue_id, "journals", api_key)
+
+        if status_id is not None and updated.get("status_id") not in (None, status_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} status mismatch: requested status_id {status_id}, "
+                f"Redmine returned status_id {updated.get('status_id')}"
+            )
+        if project_id is not None and updated.get("project_id") not in (None, project_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} project mismatch: requested project_id {project_id}, "
+                f"Redmine returned project_id {updated.get('project_id')}"
+            )
+        if tracker_id is not None and updated.get("tracker_id") not in (None, tracker_id):
+            raise RuntimeError(
+                f"Redmine issue {issue_id} tracker mismatch: requested tracker_id {tracker_id}, "
+                f"Redmine returned tracker_id {updated.get('tracker_id')}"
+            )
+
         return updated
 
     def _add_issue_note(self, issue_id, note, api_key):
