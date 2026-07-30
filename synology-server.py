@@ -367,6 +367,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                 {"name": "list_trackers", "description": "List Redmine trackers, optionally filtered by project",
                  "inputSchema": {"type": "object", "properties": {
                      "project_id": {"type": "number"}}}},
+                {"name": "list_priorities", "description": "List issue priorities configured on the Redmine instance",
+                 "inputSchema": {"type": "object", "properties": {}}},
                 {"name": "create_project", "description": "Create a new Redmine project",
                  "inputSchema": {"type": "object", "properties": {
                      "name": {"type": "string"}, "identifier": {"type": "string"},
@@ -441,6 +443,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                     args.get("category_id"), api_key)
             elif name == "list_trackers":
                 return self._list_trackers(args.get("project_id"), api_key)
+            elif name == "list_priorities":
+                return self._list_priorities(api_key)
             elif name == "create_project":
                 return self._create_project(
                     args.get("name"), args.get("identifier"), args.get("description", ""),
@@ -613,6 +617,17 @@ class MCPHandler(BaseHTTPRequestHandler):
                 for t in filtered
             ],
         }
+
+    def _list_priorities(self, api_key):
+        data = _rm_request("GET", "/enumerations/issue_priorities.json", api_key)
+        return [
+            {
+                "id": priority.get("id"),
+                "name": priority.get("name"),
+                "is_default": priority.get("is_default", False),
+            }
+            for priority in data.get("issue_priorities", [])
+        ]
 
     def _create_project(self, name, identifier, description, parent_id, inherit_members, api_key):
         project = {
