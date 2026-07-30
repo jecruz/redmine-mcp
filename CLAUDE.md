@@ -23,6 +23,7 @@ Instance env files live under `/Users/jeffreycruz/Development/agent-zero-data/<i
 - `MCP_PORT` — Port to bind (default: 8080)
 - `MCP_PATH` — SSE path (default: /sse)
 - `REQUEST_TIMEOUT` — HTTP timeout in seconds (default: 30)
+- `MAX_ATTACHMENT_BYTES` — Maximum attachment upload size (default: 52428800)
 
 ## Available Tools
 

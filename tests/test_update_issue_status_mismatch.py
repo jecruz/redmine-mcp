@@ -103,8 +103,8 @@ def test_server_update_issue_status_raises_status_mismatch(
 
     monkeypatch.setattr(module, "_request", fake_request)
 
-    with pytest.raises(RuntimeError, match="status mismatch"):
-        module.update_issue_status(issue_id=1059, status_id=5)
+    with pytest.raises(module.RedmineWorkflowError, match="status mismatch"):
+        module.update_issue_status(issue_id=1059, status_id=5, verify=True)
 
 
 def test_server_update_issue_status_sends_note(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,10 +181,10 @@ def test_synology_update_issue_status_raises_status_mismatch(
 
     result = handler._call_tool(
         "update_issue_status",
-        {"issue_id": 1059, "status_id": 5},
+        {"issue_id": 1059, "status_id": 5, "verify": True},
     )
 
-    # The handler surfaces RuntimeError as a JSON-RPC error envelope.
+    # The handler surfaces the typed workflow error as a JSON-RPC error envelope.
     assert isinstance(result, dict)
     assert "error" in result
     assert "status mismatch" in result["error"]
